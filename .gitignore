@@ -1,0 +1,26 @@
+# Secrets — NEVER commit these
+include/secrets.h
+secrets.h
+*.env
+.env*
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.pio/libdeps/
+.pio/build/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Build artifacts
+*.bin
+*.elf
