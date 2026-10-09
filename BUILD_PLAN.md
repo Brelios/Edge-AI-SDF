@@ -1,6 +1,6 @@
 # Edge AI Smart Door Feed — Comprehensive Build Plan
 
-> **Hardware:** ESP32-CAM (AI-Thinker) · **Programmer:** ESP32-WROOM-32 DevKit (Intelitek kit) · **AI:** Google Gemini 1.5 Flash · **Notifications:** Telegram Bot API
+> **Hardware:** ESP32-CAM (AI-Thinker) · **Programmer:** ESP32-CAM-MB USB Base *or* ESP32-WROOM-32 DevKit (Intelitek kit) · **AI:** Google Gemini 2.0 Flash · **Notifications:** Telegram Bot API
 
 ---
 
@@ -38,7 +38,7 @@
 └──────────────────────────────────────────────────────────────────────┘
                                                 │
                               ┌─────────────────▼──────────────────┐
-                              │     Google Gemini 1.5 Flash API     │
+                              │     Google Gemini 2.0 Flash API     │
                               │  Input : base64 JPEG + text prompt  │
                               │  Output: JSON { summary, actions[] }│
                               └─────────────────┬──────────────────┘
@@ -69,11 +69,12 @@ t=3600ms ESP32-CAM returns to deep sleep
 | # | Component | Qty | Notes |
 |---|-----------|-----|-------|
 | 1 | ESP32-CAM (AI-Thinker, OV2640) | 1 | Your main device |
-| 2 | ESP32-WROOM-32 DevKit (Intelitek) | 1 | Used as USB-UART programmer only |
+| 2a | ESP32-CAM-MB USB Base | 1 | **Easiest option:** plug-in USB programmer with auto-reset (CH340 chip) |
+| 2b | ESP32-WROOM-32 DevKit (Intelitek) | 1 | **Alternative:** used as USB-UART programmer with manual wiring |
 | 3 | PIR Motion Sensor | 1 | AM312 (3.3V) preferred; HC-SR501 (5V) needs level shift |
 | 4 | 5V ≥2A Wall Adapter + Micro-USB cable | 1 | Powers ESP32-CAM in deployment |
 | 5 | 100µF 16V Electrolytic Capacitor | 1 | Across 5V rail to prevent Wi-Fi brownout |
-| 6 | Female-to-Female DuPont jumper wires | ~8 | For flashing + PIR connections |
+| 6 | Female-to-Female DuPont jumper wires | ~8 | For DevKit flashing + PIR connections |
 | 7 | Breadboard | 1 | From Intelitek kit |
 
 > **⚠️ HC-SR501 Warning:** Its output signal is 5V. The ESP32-CAM GPIO max is 3.3V.
@@ -89,19 +90,19 @@ t=3600ms ESP32-CAM returns to deep sleep
                     ┌──────────────────────────────┐
                     │        [ OV2640 Camera ]      │
                     │         (ribbon cable)        │
-                    │                              │
-              ┌─────┴──────────────────────────────┴─────┐
-              │  ○ GND         [ESP32-S module]   3.3V ○ │
-              │  ○ 5V                             GND  ○ │
-              │  ○ IO12  ← SD card D2             IO1  ○ │← TX  (U0TXD) ★ FLASH
-              │  ○ IO13  ← SD card D3             IO3  ○ │← RX  (U0RXD) ★ FLASH
-              │  ○ IO15  ← SD card CMD            IO0  ○ │← BOOT/FLASH (GND=flash mode) ★
-              │  ○ IO14  ← SD card CLK            GND  ○ │
-              │  ○ IO2   ← SD card D0             IO4  ○ │← Onboard Flash LED (active HIGH)
-              │  ○ IO4   ← SD card D1 / LED                          │
-              │                                              │
-              │            [MicroSD slot]                    │
-              └────────────────────────────────────────────┘
+                    │                               │
+              ┌─────┴───────────────────────────────┴─────┐
+              │  ○ GND         [ESP32-S module]    3.3V ○ │
+              │  ○ 5V                              GND  ○ │
+              │  ○ IO12  ← SD card D2              IO1  ○ │← TX  (U0TXD) ★ FLASH
+              │  ○ IO13  ← SD card D3              IO3  ○ │← RX  (U0RXD) ★ FLASH
+              │  ○ IO15  ← SD card CMD             IO0  ○ │← BOOT/FLASH (GND=flash mode) ★
+              │  ○ IO14  ← SD card CLK             GND  ○ │
+              │  ○ IO2   ← SD card D0              IO4  ○ │← SD card D1 / Flash LED (active HIGH)
+              │  ○ IO16  ← PSRAM (limited use)            │
+              │                                           │
+              │            [MicroSD slot]                  │
+              └───────────────────────────────────────────┘
 
 ★ = Pins used during flashing / boot configuration
 ```
@@ -114,15 +115,16 @@ t=3600ms ESP32-CAM returns to deep sleep
 | GND | GND | Ground |
 | IO1 | U0TXD | UART TX — connects to programmer RX |
 | IO3 | U0RXD | UART RX — connects to programmer TX |
-| IO0 | BOOT | Pull LOW (GND) to enter flash mode; float/HIGH for normal boot |
-| IO4 | LED | Onboard white flash LED — also shared with SD card D1 |
-| IO13 | — | **Recommended PIR input** (safe GPIO, no boot conflict) |
-| IO12 | — | ⚠️ Strapping pin — must be LOW at boot; avoid for PIR |
-| IO2 | — | ⚠️ Strapping pin — must be LOW at boot |
+| IO0 | BOOT | Pull LOW (GND) to enter flash mode; float/HIGH for normal boot. Also camera XCLK. |
+| IO4 | LED / SD D1 | Onboard white flash LED — also shared with SD card D1 |
+| IO13 | SD D3 | **Recommended PIR input** (safe GPIO when SD card not used, no boot conflict) |
+| IO12 | SD D2 | ⚠️ Strapping pin — must be LOW at boot (selects flash voltage); avoid for PIR |
+| IO2 | SD D0 | ⚠️ Strapping pin — must be LOW at boot |
+| IO16 | PSRAM | Connected to PSRAM on most AI-Thinker boards — **do not use** for external I/O |
 
 > **SD card vs PIR:** If you are NOT using the MicroSD slot, IO12–IO15 are all available.
 > If you ARE using SD, use IO13 only carefully or use another free GPIO.
-> **Recommended PIR pin: IO13**
+> **Recommended PIR pin: IO13** (only works reliably when SD card is disabled in firmware)
 
 ---
 
@@ -172,6 +174,26 @@ t=3600ms ESP32-CAM returns to deep sleep
 
 ### Phase A: Flashing Wiring (One-time setup)
 
+> Choose **one** of the two methods below depending on which programmer you have.
+
+#### Method 1: ESP32-CAM-MB USB Base (Recommended — zero wiring)
+
+> The ESP32-CAM-MB is a plug-in USB base board with a CH340 USB-UART chip and auto-reset circuitry (DTR/RTS). No jumper wires needed.
+
+```
+1. Plug the ESP32-CAM directly into the MB base board
+   (pins align — camera faces away from USB connector)
+2. Connect MB base to PC via Micro-USB cable
+3. In PlatformIO: select the COM port → click Upload
+4. The MB auto-pulls IO0 LOW and resets for you — fully automatic
+5. When done: firmware runs immediately, no wires to remove
+```
+
+> **⚠️ Note:** Some MB clones lack proper auto-reset. If upload fails with `Connecting....____`:
+> hold the IO0/BOOT button on the MB base while pressing RST, then release both → retry upload.
+
+#### Method 2: ESP32-WROOM-32 DevKit as Programmer (Manual wiring)
+
 > This wiring lets you upload firmware from your PC to the ESP32-CAM via the DevKit's USB-UART chip.
 
 ```
@@ -185,7 +207,7 @@ PC (USB)
 │                          │         │                          │
 │  EN ────────── GND  (★1) │         │                          │
 │                          │         │                          │
-│  3V3 ───────────────────────────►  │ 3.3V                     │
+│  5V  ───────────────────────────►  │ 5V                       │
 │  GND ───────────────────────────►  │ GND                      │
 │  TX  ───────────────────────────►  │ IO3 (U0RXD)              │
 │  RX  ◄──────────────────────────   │ IO1 (U0TXD)              │
@@ -204,7 +226,10 @@ PC (USB)
     REMOVE this wire after flashing before pressing Reset.
 ```
 
-**Step-by-step flash procedure:**
+> **⚠️ Power:** Use **5V** (not 3V3) from the DevKit to power the ESP32-CAM.
+> The CAM board has its own 3.3V regulator and draws too much current for the DevKit's 3.3V output.
+
+**Step-by-step flash procedure (Method 2 only):**
 
 ```
 1. Wire everything as above (EN→GND on DevKit, IO0→GND on CAM)
@@ -333,7 +358,7 @@ setup() — runs every wake from deep sleep
 │
 ├── 6. HTTPS POST to Gemini API
 │       ├── Endpoint: generativelanguage.googleapis.com
-│       ├── Model: gemini-1.5-flash
+│       ├── Model: gemini-2.0-flash
 │       ├── Prompt: "Describe what is happening at this door in 2 sentences.
 │       │           Return JSON: {summary: string, actions: string[]}"
 │       └── Body: { contents: [{ parts: [image, text] }] }
@@ -434,10 +459,15 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
 ### Step 1 — Verify Serial Connection
 
 ```
-1. Wire DevKit → CAM (Phase A wiring, including IO0→GND)
-2. Plug DevKit into PC
-3. PlatformIO → Serial Monitor → check baud 115200
-4. Press RESET on CAM → you should see bootloader messages
+Using ESP32-CAM-MB:
+  1. Plug CAM into MB base → connect USB → open Serial Monitor (115200 baud)
+  2. Press RST on MB → you should see bootloader messages
+
+Using DevKit as programmer:
+  1. Wire DevKit → CAM (Phase A Method 2 wiring, including IO0→GND)
+  2. Plug DevKit into PC
+  3. PlatformIO → Serial Monitor → check baud 115200
+  4. Press RESET on CAM → you should see bootloader messages
 ```
 
 ### Step 2 — Flash Firmware
@@ -505,17 +535,37 @@ Door frame (exterior)
 - Long USB cables cause voltage drop — keep cable under 1.5m or use higher gauge cable
 - The 100µF capacitor must be placed **as close as possible** to the ESP32-CAM 5V and GND pins
 
-### OTA (Over-the-Air) Updates — Optional but Recommended
+### OTA (Over-the-Air) Updates — Optional but Requires Careful Handling
 
-Once deployed, reprogramming without physical access requires OTA. Add to firmware:
+> **⚠️ Deep sleep + OTA conflict:** ArduinoOTA requires the device to be **awake and connected to WiFi** to receive updates. Since this firmware enters deep sleep immediately after each cycle, the OTA window is effectively zero.
+
+**Workaround — GPIO-triggered OTA mode:**
+
+Use a jumper or switch on a spare GPIO to keep the device awake in "OTA mode" when you need to update firmware remotely:
 
 ```cpp
 #include <ArduinoOTA.h>
-// In setup():
-ArduinoOTA.begin();
-// In loop() or before deep sleep:
-ArduinoOTA.handle();
+
+#define OTA_MODE_PIN 15  // Connect to GND via jumper to enable OTA mode
+
+void setup() {
+    pinMode(OTA_MODE_PIN, INPUT_PULLUP);
+
+    if (digitalRead(OTA_MODE_PIN) == LOW) {
+        // OTA MODE: stay awake, don't deep sleep
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        while (WiFi.status() != WL_CONNECTED) delay(500);
+        ArduinoOTA.begin();
+        Serial.println("OTA mode active — waiting for update...");
+        while (true) { ArduinoOTA.handle(); delay(10); }
+    }
+
+    // Normal operation continues below...
+}
 ```
+
+> **Usage:** Connect IO15 to GND with a jumper → reset the board → it stays awake for OTA.
+> Upload new firmware via PlatformIO's "Upload OTA" option. Remove jumper when done.
 
 ---
 
@@ -523,10 +573,11 @@ ArduinoOTA.handle();
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `Connecting....____` never connects | IO0 not connected to GND | Check IO0→GND wire |
+| `Connecting....____` never connects | IO0 not connected to GND | Check IO0→GND wire (DevKit method), or hold IO0/BOOT button on MB base |
+| No COM port detected | Missing CH340 driver (MB base) | Install CH340 driver from [wch-ic.com](https://www.wch-ic.com/downloads/CH341SER_EXE.html) |
 | `rst:0x10 (RTCWDT_RTC_RESET)` | Brownout — insufficient power | Add/increase capacitor; use better power supply |
 | `Camera init failed` | Ribbon cable loose | Reseat OV2640 ribbon cable firmly |
-| `HTTP 400 from Gemini` | Bad JSON or wrong model name | Check prompt format; model is `gemini-1.5-flash` |
+| `HTTP 400 from Gemini` | Bad JSON or wrong model name | Check prompt format; model is `gemini-2.0-flash` |
 | `HTTP 403 from Gemini` | Invalid API key | Regenerate key in AI Studio |
 | PIR triggers constantly (false) | Sensitivity too high (HC-SR501) | Turn onboard sensitivity pot counter-clockwise |
 | PIR never triggers | Signal not reaching GPIO13 | Check wiring; verify PIR LED blinks on motion |

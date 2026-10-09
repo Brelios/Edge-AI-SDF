@@ -7,7 +7,7 @@ An ultra-lightweight, event-driven door camera system powered by an ESP32-CAM an
 ## 🛠️ Hardware Requirements
 
 * **ESP32-CAM Board** (AI-Thinker Model with OV2640 Camera Module)
-* **ESP32-CAM-MB** Micro-USB Programmer Base
+* **ESP32-CAM-MB** Micro-USB Programmer Base *or* **ESP32-WROOM-32 DevKit** (Intelitek kit, used as USB-UART programmer)
 * **PIR Motion Sensor** (AM312 or HC-SR501)
 * **5V 2A Power Supply** with Micro-USB Cable
 * **DuPont Jumper Wires** (Female-to-Female & Female-to-Male)
