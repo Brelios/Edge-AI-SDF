@@ -20,7 +20,7 @@ The ESP32-CAM (AI Thinker) has **no USB port**, so it needs a USB-to-serial adap
 
 | # | NodeMCU (ESP8266) | ESP32-CAM | Purpose |
 |---|-------------------|-----------|---------|
-| 1 | `EN` | `GND` (on the NodeMCU itself) | Disables the ESP8266 chip so it acts as a pure USB-serial bridge |
+| 1 | `EN` -> `GND` (on the NodeMCU itself) | — | Disables the ESP8266 chip so it acts as a pure USB-serial bridge |
 | 2 | `TX` | `U0T` (GPIO1) | Serial data |
 | 3 | `RX` | `U0R` (GPIO3) | Serial data |
 | 4 | `VIN` (5 V from USB) | `5V` | Power (recommended) |
