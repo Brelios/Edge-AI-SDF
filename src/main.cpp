@@ -68,7 +68,7 @@ void setup() {
         return;
     }
     Serial.printf("Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
-    delay(500); // Allow sensor AGC and AEC to stabilize before capturing
+    delay(800); // Allow sensor AGC and AWB to stabilize colors before capturing
 
     // ── 3. Capture JPEG + Base64 encode immediately (instant shutter) ───────
     camera_fb_t* fb = nullptr;
@@ -180,11 +180,19 @@ bool initCamera() {
         return false;
     }
 
-    // Improve image quality on OV2640
+    // Improve image quality & fix greenish tint on OV2640
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        s->set_brightness(s, 1);
-        s->set_saturation(s, 0);
+        s->set_brightness(s, 1);     // -2 to 2
+        s->set_contrast(s, 0);       // -2 to 2
+        s->set_saturation(s, 0);     // -2 to 2
+        s->set_whitebal(s, 1);       // enable auto white balance
+        s->set_awb_gain(s, 1);       // enable AWB gain
+        s->set_wb_mode(s, 0);        // 0 = Auto AWB
+        s->set_exposure_ctrl(s, 1);  // enable auto exposure
+        s->set_aec2(s, 1);           // enable AEC DSP
+        s->set_gain_ctrl(s, 1);      // enable auto gain
+        s->set_gainceiling(s, (gainceiling_t)2);
     }
     return true;
 }
@@ -326,6 +334,25 @@ String callGeminiAPI(const String& base64Image) {
         Serial.printf("Gemini HTTP error: %d\n", httpCode);
         Serial.println(http.getString().substring(0, 300));
         http.end();
+
+        // If temporary 503 high demand spike, retry once after 2 seconds
+        if (httpCode == 503) {
+            Serial.println("Gemini 503 (high demand) — retrying once in 2s...");
+            delay(2000);
+            http.begin(client, url);
+            http.addHeader("Content-Type", "application/json");
+            http.addHeader("x-goog-api-key", GEMINI_API_KEY);
+            http.setTimeout(30000);
+            httpCode = http.POST(body);
+            if (httpCode == 200) {
+                String response = http.getString();
+                http.end();
+                Serial.println("Gemini retry responded OK");
+                return response;
+            }
+            Serial.printf("Gemini retry also failed: %d\n", httpCode);
+            http.end();
+        }
         return "";
     }
 
@@ -342,8 +369,8 @@ String callGeminiAPI(const String& base64Image) {
 // ===========================================================================
 void parseGeminiResponse(const String& jsonResponse,
                          String& summary, String& urgency) {
-    summary = "No response from Gemini.";
-    urgency = "none";
+    summary = "Door activity captured. (Gemini cloud AI was temporarily busy under high demand).";
+    urgency = "low";
     if (jsonResponse.isEmpty()) return;
 
     // Step 1 — filter-parse the outer Gemini envelope, keeping only the text field
@@ -492,17 +519,17 @@ bool sendTelegramMessage(const String& text) {
 // ===========================================================================
 void goToSleep() {
     Serial.println("\n=== Cycle Complete ===");
-    Serial.println("Configuring wakeup: PIR (GPIO13) + 15-second auto-wakeup timer...");
+    Serial.println("Configuring wakeup: PIR (GPIO13) + 30-second cooldown timer...");
     
     // 1. Arm PIR on GPIO13 (if attached)
     rtc_gpio_pullup_dis(PIR_GPIO);
     rtc_gpio_pulldown_en(PIR_GPIO);
     esp_sleep_enable_ext0_wakeup(PIR_GPIO, HIGH);
 
-    // 2. Arm 15s timer wakeup (allows hands-free testing without PIR!)
-    esp_sleep_enable_timer_wakeup(15ULL * 1000000ULL);
+    // 2. Arm 30s timer wakeup (keeps within free API tier and allows hands-free testing)
+    esp_sleep_enable_timer_wakeup(COOLDOWN_US);
 
-    Serial.println("Entering deep sleep (wakes in 15s or on PIR / RST button)...");
+    Serial.println("Entering deep sleep (wakes in 30s or on PIR / RST button)...");
     delay(1000);
     Serial.flush();
     esp_deep_sleep_start();
