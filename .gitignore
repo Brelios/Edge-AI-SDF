@@ -1,26 +1,37 @@
-# Secrets — NEVER commit these
+# =============================================================================
+# Secrets — NEVER commit these files
+# =============================================================================
 include/secrets.h
 secrets.h
+**/secrets.h
 *.env
 .env*
 
-# PlatformIO
+# =============================================================================
+# PlatformIO & Build Artifacts
+# =============================================================================
 .pio/
 .pioenvs/
 .piolibdeps/
 .pio/libdeps/
 .pio/build/
-
-# VS Code
-.vscode/
-
-# macOS
-.DS_Store
-
-# Windows
-Thumbs.db
-desktop.ini
-
-# Build artifacts
 *.bin
 *.elf
+*.hex
+
+# =============================================================================
+# VS Code & IDEs
+# =============================================================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*~
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
