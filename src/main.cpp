@@ -98,15 +98,14 @@ void setup() {
     parseGeminiResponse(geminiResponse, summary, urgency);
     Serial.println("Gemini summary: " + summary + " [" + urgency + "]");
 
-    // ── 8. Send Telegram photo + message ────────────────────────────────────
-    // Urgency emoji map
+    // ── 8. Send Telegram photo with unified caption (no duplicate text message) ─
     String emoji = "🟢";
     if      (urgency == "low")    emoji = "🟡";
     else if (urgency == "medium") emoji = "🟠";
     else if (urgency == "high")   emoji = "🔴";
 
-    sendTelegramPhoto(fb, summary);
-    sendTelegramMessage(emoji + " *Door Alert* [" + urgency + "]\n" + summary);
+    String caption = emoji + " Door Alert [" + urgency + "]\n\n" + summary;
+    sendTelegramPhoto(fb, caption);
 
     // ── 9. Release frame buffer ─────────────────────────────────────────────
     esp_camera_fb_return(fb);
@@ -155,9 +154,9 @@ bool initCamera() {
     config.pixel_format = PIXFORMAT_JPEG;
 
     if (psramFound()) {
-        Serial.println("PSRAM found — configuring VGA (640x480)");
-        config.frame_size   = FRAMESIZE_VGA;
-        config.jpeg_quality = 12;
+        Serial.println("PSRAM found — configuring HD (1280x720)");
+        config.frame_size   = FRAMESIZE_HD;
+        config.jpeg_quality = 10;
         config.fb_count     = 2;
         config.fb_location  = CAMERA_FB_IN_PSRAM;
         config.grab_mode    = CAMERA_GRAB_LATEST;
@@ -180,19 +179,26 @@ bool initCamera() {
         return false;
     }
 
-    // Improve image quality & fix greenish tint on OV2640
+    // Enhance image clarity & prevent smearing on OV2640
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        s->set_brightness(s, 1);     // -2 to 2
-        s->set_contrast(s, 0);       // -2 to 2
+        s->set_brightness(s, 1);     // -2 to 2 (slight lift for indoor/shadows)
+        s->set_contrast(s, 1);       // -2 to 2 (clean edge contrast)
         s->set_saturation(s, 0);     // -2 to 2
+        s->set_sharpness(s, 1);      // -2 to 2 (hardware edge sharpening)
         s->set_whitebal(s, 1);       // enable auto white balance
         s->set_awb_gain(s, 1);       // enable AWB gain
         s->set_wb_mode(s, 0);        // 0 = Auto AWB
         s->set_exposure_ctrl(s, 1);  // enable auto exposure
-        s->set_aec2(s, 1);           // enable AEC DSP
+        s->set_aec2(s, 1);           // enable advanced AEC DSP
+        s->set_ae_level(s, 0);       // target exposure level
         s->set_gain_ctrl(s, 1);      // enable auto gain
-        s->set_gainceiling(s, (gainceiling_t)2);
+        s->set_gainceiling(s, (gainceiling_t)4); // 4X ceiling prevents slow shutter smearing in low light
+        s->set_lenc(s, 1);           // Lens correction: eliminates corner vignette/edge blur
+        s->set_bpc(s, 1);            // Black pixel correction
+        s->set_wpc(s, 1);            // White pixel correction
+        s->set_dcw(s, 1);            // Downsize/crop window (enhances clarity)
+        s->set_raw_gma(s, 1);        // Raw gamma curve correction
     }
     return true;
 }
@@ -222,7 +228,14 @@ bool connectWiFi() {
 // Capture JPEG + Base64 Encode
 // ===========================================================================
 String captureAndEncodeJPEG(camera_fb_t** fb_out) {
-    Serial.println("Capturing camera frame...");
+    Serial.println("Stabilizing sensor & capturing fresh frame...");
+
+    // Discard initial frames to let AEC/AWB converge and clear stale DMA buffer (prevents smearing)
+    for (int i = 0; i < 4; i++) {
+        camera_fb_t* dummy = esp_camera_fb_get();
+        if (dummy) esp_camera_fb_return(dummy);
+        delay(40);
+    }
 
     camera_fb_t* fb = nullptr;
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -239,9 +252,9 @@ String captureAndEncodeJPEG(camera_fb_t** fb_out) {
     *fb_out = fb;
     Serial.printf("Captured frame: %u bytes (%dx%d)\n", fb->len, fb->width, fb->height);
 
-    // Calculate Base64 output size and allocate buffer
+    // Calculate Base64 output size and allocate buffer in PSRAM if available
     size_t encodedLen = ((fb->len + 2) / 3) * 4 + 1;
-    uint8_t* encodedBuf = (uint8_t*)malloc(encodedLen);
+    uint8_t* encodedBuf = psramFound() ? (uint8_t*)ps_malloc(encodedLen) : (uint8_t*)malloc(encodedLen);
     if (!encodedBuf) {
         Serial.println("Base64 malloc failed");
         return "";
@@ -282,7 +295,7 @@ String callGeminiAPI(const String& base64Image) {
     // System prompt — plain ASCII, no embedded double-quotes, safe in raw JSON string
     static const char* systemPrompt =
         "You are a front-door security camera assistant. You receive one still image "
-        "from a low-resolution camera (about 640x480) that may be dark or grainy. "
+        "from an HD door camera (1280x720). "
         "Describe only what is clearly visible and never guess about anything you cannot make out. "
         "Do not identify anyone by name; use neutral descriptions such as clothing or what they carry. "
         "If nothing notable is happening, use the summary No activity at the door, urgency none, and an empty actions list. "
@@ -454,7 +467,7 @@ bool sendTelegramPhoto(camera_fb_t* fb, const String& caption) {
     size_t tailLen = bodyTail.length();
     size_t totalLen = headLen + fb->len + tailLen;
 
-    uint8_t* bodyBuf = (uint8_t*)malloc(totalLen);
+    uint8_t* bodyBuf = psramFound() ? (uint8_t*)ps_malloc(totalLen) : (uint8_t*)malloc(totalLen);
     if (!bodyBuf) {
         Serial.println("Telegram photo: malloc failed for body buffer");
         http.end();
