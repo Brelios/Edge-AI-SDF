@@ -30,7 +30,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 #define PIR_GPIO GPIO_NUM_13         // PIR OUT connected to IO13
-#define STATUS_LED_GPIO GPIO_NUM_33  // Built-in RED LED on back of AI-Thinker (Active LOW)
+#define FLASH_LED_GPIO GPIO_NUM_4    // High-power White Flash LED on front (Active HIGH)
 #define WIFI_TIMEOUT_MS 10000        // 10 s WiFi connect timeout
 #define MOTION_COOLDOWN_MS 15000     // 15s quiet cooldown with WiFi off to let sensor settle
 
@@ -50,17 +50,17 @@
 #define TELEGRAM_HOST "api.telegram.org"
 
 // ---------------------------------------------------------------------------
-// System States & Hardware Signal Indicators
+// System States & Flash Signal Indicators
 // ---------------------------------------------------------------------------
 enum SystemState {
-  STATE_SLEEPING,        // LED OFF: Asleep, waiting for PIR motion
-  STATE_MOTION_DETECTED, // Solid ON: Instant frame shutter fired (<60ms)
-  STATE_WIFI_CONNECTING, // Fast Blink (10 Hz): Handshake with Wi-Fi AP
-  STATE_GEMINI_CALL,     // Medium Pulse (2 Hz): Gemini Cloud AI processing
-  STATE_TELEGRAM_SEND,   // Double Flash: Delivering photo to Telegram
-  STATE_COOLDOWN,        // Slow Beacon (1 blip / 2.5s): RF quiet period, Wi-Fi OFF
-  STATE_PIR_WAIT_CLEAR,  // Triple Flash: Warning - PIR pin still held HIGH
-  STATE_ERROR            // Rapid SOS: Error occurred
+  STATE_SLEEPING,        // FLASH OFF: Asleep, waiting for PIR motion
+  STATE_MOTION_DETECTED, // FLASH ON (Shutter Assist): Camera flash for instant snap
+  STATE_WIFI_CONNECTING, // Crisp Strobe: 15ms flash every 200ms (Handshaking Wi-Fi)
+  STATE_GEMINI_CALL,     // Slow Strobe: 30ms flash every 600ms (Gemini AI inference)
+  STATE_TELEGRAM_SEND,   // Double Strobe: Two quick flashes (Photo upload)
+  STATE_COOLDOWN,        // Micro-Beacon: 10ms flash every 3s (RF Cooldown)
+  STATE_PIR_WAIT_CLEAR,  // Triple Strobe: Warning - PIR pin still held HIGH
+  STATE_ERROR            // Rapid Staccato: Error occurred
 };
 
 static volatile SystemState g_systemState = STATE_SLEEPING;
@@ -69,70 +69,70 @@ void setSystemState(SystemState state) {
   g_systemState = state;
 }
 
-// Background FreeRTOS task to drive the Status LED on Core 0
+// Background FreeRTOS task to drive the Flash LED on Core 0
 void ledStatusTask(void *pvParameters) {
-  pinMode(STATUS_LED_GPIO, OUTPUT);
-  digitalWrite(STATUS_LED_GPIO, HIGH); // Inverted logic: HIGH = OFF
+  pinMode(FLASH_LED_GPIO, OUTPUT);
+  digitalWrite(FLASH_LED_GPIO, LOW); // Active HIGH: LOW = OFF
 
   while (true) {
     switch (g_systemState) {
       case STATE_SLEEPING:
-        digitalWrite(STATUS_LED_GPIO, HIGH); // OFF
+        digitalWrite(FLASH_LED_GPIO, LOW); // OFF
         vTaskDelay(pdMS_TO_TICKS(100));
         break;
 
       case STATE_MOTION_DETECTED:
-        digitalWrite(STATUS_LED_GPIO, LOW); // Solid ON
+        digitalWrite(FLASH_LED_GPIO, HIGH); // Flash ON for camera snapshot
         vTaskDelay(pdMS_TO_TICKS(50));
         break;
 
-      case STATE_WIFI_CONNECTING: // Fast Blink (10 Hz): 80ms ON, 80ms OFF
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(80));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(80));
+      case STATE_WIFI_CONNECTING: // Crisp Strobe: 15ms ON, 200ms OFF
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(15));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(200));
         break;
 
-      case STATE_GEMINI_CALL: // Pulse (2 Hz): 250ms ON, 250ms OFF
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(250));
+      case STATE_GEMINI_CALL: // Slow Strobe: 30ms ON, 600ms OFF
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(600));
         break;
 
-      case STATE_TELEGRAM_SEND: // Double Flash: 2 quick blinks
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(60));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(60));
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(60));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(400));
+      case STATE_TELEGRAM_SEND: // Double Strobe: 2 quick flashes
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(15));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(70));
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(15));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(500));
         break;
 
-      case STATE_COOLDOWN: // Slow Beacon: 40ms pulse every 2.5s
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(40));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(2460));
+      case STATE_COOLDOWN: // Micro-Beacon: 10ms pulse every 3s
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(2990));
         break;
 
-      case STATE_PIR_WAIT_CLEAR: // Triple Flash: Warning PIR pin held HIGH
+      case STATE_PIR_WAIT_CLEAR: // Triple Strobe: Warning PIR pin held HIGH
         for (int i = 0; i < 3; i++) {
-          digitalWrite(STATUS_LED_GPIO, LOW);
-          vTaskDelay(pdMS_TO_TICKS(50));
-          digitalWrite(STATUS_LED_GPIO, HIGH);
-          vTaskDelay(pdMS_TO_TICKS(50));
+          digitalWrite(FLASH_LED_GPIO, HIGH);
+          vTaskDelay(pdMS_TO_TICKS(20));
+          digitalWrite(FLASH_LED_GPIO, LOW);
+          vTaskDelay(pdMS_TO_TICKS(80));
         }
-        vTaskDelay(pdMS_TO_TICKS(400));
+        vTaskDelay(pdMS_TO_TICKS(600));
         break;
 
       case STATE_ERROR: // Rapid Staccato
-        digitalWrite(STATUS_LED_GPIO, LOW);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        digitalWrite(STATUS_LED_GPIO, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        digitalWrite(FLASH_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        digitalWrite(FLASH_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(70));
         break;
     }
   }
@@ -193,12 +193,12 @@ void setup() {
     processMotionCycle();
   } else if (isColdBoot) {
     Serial.println("[BOOT] Cold boot self-test OK. Armed & entering sleep.");
-    // 3 quick blinks acknowledging ready
+    // 3 crisp flashes acknowledging ready
     for (int i = 0; i < 3; i++) {
-      digitalWrite(STATUS_LED_GPIO, LOW);
-      delay(80);
-      digitalWrite(STATUS_LED_GPIO, HIGH);
-      delay(80);
+      digitalWrite(FLASH_LED_GPIO, HIGH);
+      delay(40);
+      digitalWrite(FLASH_LED_GPIO, LOW);
+      delay(100);
     }
   } else {
     Serial.println("[BOOT] PIR is LOW on wake — entering sleep mode");
@@ -788,7 +788,7 @@ void goToSleep() {
   }
 
   setSystemState(STATE_SLEEPING);
-  digitalWrite(STATUS_LED_GPIO, HIGH); // Explicitly ensure LED is OFF
+  digitalWrite(FLASH_LED_GPIO, LOW); // Explicitly ensure Flash LED is OFF
 
   // Arm PIR on GPIO13 as ext0 wakeup source
   rtc_gpio_pullup_dis(PIR_GPIO);
