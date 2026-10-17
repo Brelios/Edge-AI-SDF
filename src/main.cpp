@@ -28,9 +28,21 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-#define PIR_GPIO         GPIO_NUM_13       // PIR OUT connected to IO13
-#define WIFI_TIMEOUT_MS  10000            // 10 s WiFi connect timeout
-#define COOLDOWN_US      (30ULL * 1000000ULL) // 30 s deep-sleep cooldown
+#define PIR_GPIO                  GPIO_NUM_13          // PIR OUT connected to IO13
+#define PIR_CAPTURE_INTERVAL_MS   4000                 // 3-5s interval between captures while motion is active
+#define SLEEP_DEBOUNCE_MS         1500                 // Wait after PIR goes LOW to confirm motion stopped
+#define WIFI_TIMEOUT_MS           10000                // 10 s WiFi connect timeout
+
+// =============================================================================
+// Wakeup Minimization Mode:
+// - Set USE_LIGHT_SLEEP = true for wall-adapter / USB power (RECOMMENDED in Build Plan):
+//     * Wakes in < 10ms!
+//     * Camera registers and RAM are kept intact (no reboot, no re-init delay)
+//     * Current draw ~1.2mA (negligible on wall power)
+// - Set USE_LIGHT_SLEEP = false for ultra-low-power battery setups:
+//     * Deep sleep draws ~20µA, cold-reboots on PIR HIGH (~600ms wake-to-shutter)
+// =============================================================================
+#define USE_LIGHT_SLEEP           true
 
 #define GEMINI_HOST      "generativelanguage.googleapis.com"
 #define GEMINI_MODEL     "gemini-3.8-flash"
@@ -46,77 +58,130 @@ String   callGeminiAPI(const String& base64Image);
 void     parseGeminiResponse(const String& jsonResponse, String& summary, String& urgency);
 bool     sendTelegramPhoto(camera_fb_t* fb, const String& caption);
 bool     sendTelegramMessage(const String& text);
+void     processMotionCycle();
 void     goToSleep();
 
 // ---------------------------------------------------------------------------
-// setup() — runs on every wake from deep sleep
+// setup() — runs on boot and every wake from deep sleep
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\n=== Edge AI Door Feed — Woke Up ===");
 
-    // ── 1. Wakeup reason ───────────────────────────────────────────────────
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    Serial.printf("Wakeup cause: %d (Running immediately — Direct Test Mode)\n", cause);
+    // Configure PIR pin with internal pulldown (prevents floating line when disconnected)
+    pinMode(PIR_GPIO, INPUT_PULLDOWN);
+    rtc_gpio_pullup_dis(PIR_GPIO);
+    rtc_gpio_pulldown_en(PIR_GPIO);
 
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    Serial.printf("Wakeup cause: %d (PIR GPIO13 = %d)\n", cause, digitalRead(PIR_GPIO));
     Serial.printf("Initial free heap: %u bytes\n", ESP.getFreeHeap());
 
-    // ── 2. Init camera FIRST (allocates contiguous DMA memory before heap fragments) ──
+    // Init camera FIRST (allocates contiguous DMA memory before heap fragments)
     if (!initCamera()) {
         Serial.println("Camera init failed — sleeping");
         goToSleep();
         return;
     }
     Serial.printf("Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
-    delay(800); // Allow sensor AGC and AWB to stabilize colors before capturing
+    delay(150); // Fast sensor AGC/AWB settle (minimized for rapid wakeup)
 
-    // ── 3. Capture JPEG + Base64 encode immediately (instant shutter) ───────
-    camera_fb_t* fb = nullptr;
-    String base64Image = captureAndEncodeJPEG(&fb);
-    if (base64Image.isEmpty() || fb == nullptr) {
-        Serial.println("Capture/encode failed — sleeping");
-        if (fb) esp_camera_fb_return(fb);
-        goToSleep();
-        return;
+    // Check motion status:
+    // Wakes on ext0 PIR trigger, PIR HIGH, or if booted manually via Reset button for immediate test
+    bool isExt0Wake = (cause == ESP_SLEEP_WAKEUP_EXT0);
+    bool isColdBoot = (cause == ESP_SLEEP_WAKEUP_UNDEFINED);
+    bool isPIRHigh  = (digitalRead(PIR_GPIO) == HIGH);
+
+    if (isExt0Wake || isPIRHigh || isColdBoot) {
+        processMotionCycle();
+    } else {
+        Serial.println("PIR is LOW on wake — entering sleep mode");
     }
-    Serial.printf("JPEG captured: %u bytes → Base64: %u chars — Free heap: %u bytes\n",
-                  fb->len, base64Image.length(), ESP.getFreeHeap());
+}
 
-    // ── 4. Connect to WiFi ──────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Active Motion Cycle — loops every 3-5 seconds while PIR remains HIGH
+// ---------------------------------------------------------------------------
+void processMotionCycle() {
+    Serial.println("\n>>> [MOTION DETECTED] Starting PIR Capture Cycle <<<");
+
+    // Connect to WiFi once and hold the connection while motion is active
     if (!connectWiFi()) {
-        Serial.println("WiFi failed — sleeping");
-        if (fb) esp_camera_fb_return(fb);
-        goToSleep();
+        Serial.println("WiFi connection failed — exiting motion cycle");
         return;
     }
-    Serial.printf("WiFi connected — Free heap: %u bytes\n", ESP.getFreeHeap());
 
+    int frameCount = 1;
+    bool motionActive = true;
 
-    // ── 6 & 7. Call Gemini API + parse response ─────────────────────────────
-    String geminiResponse = callGeminiAPI(base64Image);
-    String summary, urgency;
-    parseGeminiResponse(geminiResponse, summary, urgency);
-    Serial.println("Gemini summary: " + summary + " [" + urgency + "]");
+    while (motionActive) {
+        unsigned long cycleStart = millis();
+        Serial.printf("\n--- Capturing Motion Alert #%d ---\n", frameCount++);
 
-    // ── 8. Send Telegram photo with unified caption (no duplicate text message) ─
-    String emoji = "🟢";
-    if      (urgency == "low")    emoji = "🟡";
-    else if (urgency == "medium") emoji = "🟠";
-    else if (urgency == "high")   emoji = "🔴";
+        // 1. Capture snapshot immediately (instant shutter)
+        camera_fb_t* fb = nullptr;
+        String base64Image = captureAndEncodeJPEG(&fb);
+        if (!base64Image.isEmpty() && fb != nullptr) {
+            Serial.printf("Captured frame: %u bytes (%dx%d) — Free heap: %u bytes\n",
+                          fb->len, fb->width, fb->height, ESP.getFreeHeap());
 
-    String caption = emoji + " Door Alert [" + urgency + "]\n\n" + summary;
-    sendTelegramPhoto(fb, caption);
+            // 2. Call Gemini API + parse response
+            String geminiResponse = callGeminiAPI(base64Image);
+            String summary, urgency;
+            parseGeminiResponse(geminiResponse, summary, urgency);
+            Serial.println("Gemini summary: " + summary + " [" + urgency + "]");
 
-    // ── 9. Release frame buffer ─────────────────────────────────────────────
-    esp_camera_fb_return(fb);
+            // 3. Send Telegram photo with unified caption
+            String emoji = "🟢";
+            if      (urgency == "low")    emoji = "🟡";
+            else if (urgency == "medium") emoji = "🟠";
+            else if (urgency == "high")   emoji = "🔴";
 
-    // ── 10. Deep sleep ──────────────────────────────────────────────────────
-    Serial.println("Done — entering deep sleep (30s cooldown)");
-    goToSleep();
+            String caption = emoji + " Door Alert [" + urgency + "]\n\n" + summary;
+            sendTelegramPhoto(fb, caption);
+
+            // 4. Release frame buffer
+            esp_camera_fb_return(fb);
+        } else {
+            Serial.println("Capture/encode failed");
+            if (fb) esp_camera_fb_return(fb);
+        }
+
+        // 5. Wait for the remainder of PIR_CAPTURE_INTERVAL_MS while checking PIR
+        Serial.printf("Waiting %d ms interval for next check...\n", PIR_CAPTURE_INTERVAL_MS);
+        while (millis() - cycleStart < PIR_CAPTURE_INTERVAL_MS) {
+            delay(100);
+        }
+
+        // 6. Check if PIR is still HIGH
+        if (digitalRead(PIR_GPIO) == HIGH) {
+            Serial.printf("Checking PIR sensor (GPIO%d): HIGH (Motion ongoing)\n", PIR_GPIO);
+            continue;
+        }
+
+        Serial.println("PIR went LOW — verifying motion stopped (debounce)...");
+
+        // Debounce verification to prevent false sleep during a brief pause
+        delay(SLEEP_DEBOUNCE_MS);
+        if (digitalRead(PIR_GPIO) == HIGH) {
+            Serial.println("PIR became active again during debounce — continuing motion loop");
+            continue;
+        }
+
+        motionActive = false;
+    }
+
+    Serial.println("Motion cycle finished.");
 }
 
 void loop() {
-    // Never reached — everything runs in setup() each wake cycle
+    goToSleep();
+
+#if USE_LIGHT_SLEEP
+    // In Light Sleep mode, execution resumes right here after waking up!
+    Serial.println("\n=== Woke from Light Sleep via PIR Motion! ===");
+    processMotionCycle();
+#endif
 }
 
 // ===========================================================================
@@ -207,6 +272,9 @@ bool initCamera() {
 // WiFi Connection
 // ===========================================================================
 bool connectWiFi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Connecting to WiFi");
@@ -268,6 +336,7 @@ String captureAndEncodeJPEG(camera_fb_t** fb_out) {
         free(encodedBuf);
         return "";
     }
+    encodedBuf[outLen] = '\0';
 
     String encoded = String((char*)encodedBuf);
     free(encodedBuf);
@@ -528,22 +597,40 @@ bool sendTelegramMessage(const String& text) {
 }
 
 // ===========================================================================
-// Deep Sleep
+// Sleep Mode (PIR-Armed: Wakes on GPIO13 HIGH)
 // ===========================================================================
 void goToSleep() {
-    Serial.println("\n=== Cycle Complete ===");
-    Serial.println("Configuring wakeup: PIR (GPIO13) + 30-second cooldown timer...");
-    
-    // 1. Arm PIR on GPIO13 (if attached)
+    Serial.println("\n=== Entering Sleep Mode ===");
+    Serial.println("Powering down WiFi radio...");
+
+    // Disconnect WiFi to eliminate idle power consumption
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+
+    // Ensure PIR signal is truly LOW before arming interrupt
+    // (Prevents instant re-trigger with a 10-second safety timeout)
+    unsigned long waitLowStart = millis();
+    while (digitalRead(PIR_GPIO) == HIGH) {
+        if (millis() - waitLowStart > 10000) {
+            Serial.println("PIR remained HIGH for 10s — proceeding to arm wakeup");
+            break;
+        }
+        Serial.println("PIR still HIGH, waiting for sensor to clear...");
+        delay(300);
+    }
+
+    // Arm PIR on GPIO13 as ext0 wakeup source
     rtc_gpio_pullup_dis(PIR_GPIO);
     rtc_gpio_pulldown_en(PIR_GPIO);
     esp_sleep_enable_ext0_wakeup(PIR_GPIO, HIGH);
 
-    // 2. Arm 30s timer wakeup (keeps within free API tier and allows hands-free testing)
-    esp_sleep_enable_timer_wakeup(COOLDOWN_US);
-
-    Serial.println("Entering deep sleep (wakes in 30s or on PIR / RST button)...");
-    delay(1000);
+#if USE_LIGHT_SLEEP
+    Serial.println("Entering Light Sleep (Instant wake <10ms, RAM & camera preserved)...");
+    Serial.flush();
+    esp_light_sleep_start();
+#else
+    Serial.println("Entering Deep Sleep (wakes on PIR HIGH or RST button)...");
     Serial.flush();
     esp_deep_sleep_start();
+#endif
 }
