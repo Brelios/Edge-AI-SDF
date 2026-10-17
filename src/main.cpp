@@ -29,32 +29,114 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-#define PIR_GPIO GPIO_NUM_13 // PIR OUT connected to IO13
-#define PIR_CAPTURE_INTERVAL_MS                                                \
-  4000 // 3-5s interval between captures while motion is active
-#define SLEEP_DEBOUNCE_MS                                                      \
-  1500 // Wait after PIR goes LOW to confirm motion stopped
-#define WIFI_TIMEOUT_MS 10000 // 10 s WiFi connect timeout
-#define MAX_ALERT_FRAMES 2 // Max photos per motion event (prevents spam loops)
-#define MOTION_COOLDOWN_MS                                                     \
-  15000 // 15s quiet cooldown with WiFi off to let sensor settle
+#define PIR_GPIO GPIO_NUM_13         // PIR OUT connected to IO13
+#define STATUS_LED_GPIO GPIO_NUM_33  // Built-in RED LED on back of AI-Thinker (Active LOW)
+#define WIFI_TIMEOUT_MS 10000        // 10 s WiFi connect timeout
+#define MOTION_COOLDOWN_MS 15000     // 15s quiet cooldown with WiFi off to let sensor settle
 
 // =============================================================================
 // Wakeup Minimization Mode:
-// - Set USE_LIGHT_SLEEP = true for wall-adapter / USB power (RECOMMENDED in
-// Build Plan):
+// - Set USE_LIGHT_SLEEP = true for wall-adapter / USB power (RECOMMENDED):
 //     * Wakes in < 10ms!
 //     * Camera registers and RAM are kept intact (no reboot, no re-init delay)
 //     * Current draw ~1.2mA (negligible on wall power)
 // - Set USE_LIGHT_SLEEP = false for ultra-low-power battery setups:
-//     * Deep sleep draws ~20µA, cold-reboots on PIR HIGH (~600ms
-//     wake-to-shutter)
+//     * Deep sleep draws ~20µA, cold-reboots on PIR HIGH (~600ms wake-to-shutter)
 // =============================================================================
 #define USE_LIGHT_SLEEP true
 
 #define GEMINI_HOST "generativelanguage.googleapis.com"
 #define GEMINI_MODEL "gemini-3.8-flash"
 #define TELEGRAM_HOST "api.telegram.org"
+
+// ---------------------------------------------------------------------------
+// System States & Hardware Signal Indicators
+// ---------------------------------------------------------------------------
+enum SystemState {
+  STATE_SLEEPING,        // LED OFF: Asleep, waiting for PIR motion
+  STATE_MOTION_DETECTED, // Solid ON: Instant frame shutter fired (<60ms)
+  STATE_WIFI_CONNECTING, // Fast Blink (10 Hz): Handshake with Wi-Fi AP
+  STATE_GEMINI_CALL,     // Medium Pulse (2 Hz): Gemini Cloud AI processing
+  STATE_TELEGRAM_SEND,   // Double Flash: Delivering photo to Telegram
+  STATE_COOLDOWN,        // Slow Beacon (1 blip / 2.5s): RF quiet period, Wi-Fi OFF
+  STATE_PIR_WAIT_CLEAR,  // Triple Flash: Warning - PIR pin still held HIGH
+  STATE_ERROR            // Rapid SOS: Error occurred
+};
+
+static volatile SystemState g_systemState = STATE_SLEEPING;
+
+void setSystemState(SystemState state) {
+  g_systemState = state;
+}
+
+// Background FreeRTOS task to drive the Status LED on Core 0
+void ledStatusTask(void *pvParameters) {
+  pinMode(STATUS_LED_GPIO, OUTPUT);
+  digitalWrite(STATUS_LED_GPIO, HIGH); // Inverted logic: HIGH = OFF
+
+  while (true) {
+    switch (g_systemState) {
+      case STATE_SLEEPING:
+        digitalWrite(STATUS_LED_GPIO, HIGH); // OFF
+        vTaskDelay(pdMS_TO_TICKS(100));
+        break;
+
+      case STATE_MOTION_DETECTED:
+        digitalWrite(STATUS_LED_GPIO, LOW); // Solid ON
+        vTaskDelay(pdMS_TO_TICKS(50));
+        break;
+
+      case STATE_WIFI_CONNECTING: // Fast Blink (10 Hz): 80ms ON, 80ms OFF
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        break;
+
+      case STATE_GEMINI_CALL: // Pulse (2 Hz): 250ms ON, 250ms OFF
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        break;
+
+      case STATE_TELEGRAM_SEND: // Double Flash: 2 quick blinks
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(60));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(60));
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(60));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(400));
+        break;
+
+      case STATE_COOLDOWN: // Slow Beacon: 40ms pulse every 2.5s
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(40));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(2460));
+        break;
+
+      case STATE_PIR_WAIT_CLEAR: // Triple Flash: Warning PIR pin held HIGH
+        for (int i = 0; i < 3; i++) {
+          digitalWrite(STATUS_LED_GPIO, LOW);
+          vTaskDelay(pdMS_TO_TICKS(50));
+          digitalWrite(STATUS_LED_GPIO, HIGH);
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        vTaskDelay(pdMS_TO_TICKS(400));
+        break;
+
+      case STATE_ERROR: // Rapid Staccato
+        digitalWrite(STATUS_LED_GPIO, LOW);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        digitalWrite(STATUS_LED_GPIO, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        break;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -75,138 +157,159 @@ void goToSleep();
 // ---------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\n=== Edge AI Door Feed — Woke Up ===");
+  Serial.println("\n\n=======================================================");
+  Serial.println("=== Edge AI Smart Door Feed — System Starting ===");
+  Serial.println("=======================================================");
 
-  // Configure PIR pin with internal pulldown (prevents floating line when
-  // disconnected)
+  // Launch background Status LED driver on Core 0
+  xTaskCreatePinnedToCore(ledStatusTask, "ledStatusTask", 2048, NULL, 1, NULL, 0);
+
+  // Configure PIR pin with internal pulldown (prevents floating line when disconnected)
   pinMode(PIR_GPIO, INPUT_PULLDOWN);
   rtc_gpio_pullup_dis(PIR_GPIO);
   rtc_gpio_pulldown_en(PIR_GPIO);
 
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  Serial.printf("Wakeup cause: %d (PIR GPIO13 = %d)\n", cause,
+  Serial.printf("[BOOT] Wakeup cause: %d | PIR GPIO13: %d\n", cause,
                 digitalRead(PIR_GPIO));
-  Serial.printf("Initial free heap: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("[BOOT] Initial free heap: %u bytes\n", ESP.getFreeHeap());
 
   // Init camera FIRST (allocates contiguous DMA memory before heap fragments)
   if (!initCamera()) {
-    Serial.println("Camera init failed — sleeping");
+    setSystemState(STATE_ERROR);
+    Serial.println("[BOOT] Camera init failed — sleeping");
     goToSleep();
     return;
   }
-  Serial.printf("Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
-  delay(150); // Fast sensor AGC/AWB settle (minimized for rapid wakeup)
+  Serial.printf("[BOOT] Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
+  delay(100);
 
   // Check motion status:
-  // Wakes on ext0 PIR trigger, PIR HIGH, or if booted manually via Reset button
-  // for immediate test
   bool isExt0Wake = (cause == ESP_SLEEP_WAKEUP_EXT0);
   bool isColdBoot = (cause == ESP_SLEEP_WAKEUP_UNDEFINED);
   bool isPIRHigh = (digitalRead(PIR_GPIO) == HIGH);
 
-  if (isExt0Wake || isPIRHigh || isColdBoot) {
+  if (isExt0Wake || isPIRHigh) {
     processMotionCycle();
+  } else if (isColdBoot) {
+    Serial.println("[BOOT] Cold boot self-test OK. Armed & entering sleep.");
+    // 3 quick blinks acknowledging ready
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(STATUS_LED_GPIO, LOW);
+      delay(80);
+      digitalWrite(STATUS_LED_GPIO, HIGH);
+      delay(80);
+    }
   } else {
-    Serial.println("PIR is LOW on wake — entering sleep mode");
+    Serial.println("[BOOT] PIR is LOW on wake — entering sleep mode");
   }
 }
 
 // ---------------------------------------------------------------------------
-// Active Motion Cycle — loops every 3-5 seconds while PIR remains HIGH
+// Active Motion Cycle — Instant Shutter FIRST, then Wi-Fi & AI
 // ---------------------------------------------------------------------------
 void processMotionCycle() {
-  Serial.println("\n>>> [MOTION DETECTED] Starting PIR Capture Cycle <<<");
+  unsigned long cycleStart = millis();
+  setSystemState(STATE_MOTION_DETECTED);
 
-  // Connect to WiFi once and hold the connection while motion is active
-  if (!connectWiFi()) {
-    Serial.println("WiFi connection failed — exiting motion cycle");
+  Serial.println("\n=======================================================");
+  Serial.println(">>> [MOTION DETECTED] Instant Shutter Triggered <<<");
+  Serial.printf("[PIR] GPIO13: %d | Timestamp: %lu ms\n", digitalRead(PIR_GPIO), cycleStart);
+
+  // 1. INSTANT SHUTTER SNAP FIRST (Pre-WiFi, in <60ms!)
+  unsigned long snapStart = millis();
+  camera_fb_t *fb = nullptr;
+  String base64Image = captureAndEncodeJPEG(&fb);
+  unsigned long shutterDuration = millis() - snapStart;
+
+  if (base64Image.isEmpty() || !fb) {
+    setSystemState(STATE_ERROR);
+    Serial.println("[SHUTTER] Capture/encode failed");
+    if (fb)
+      esp_camera_fb_return(fb);
     return;
   }
+  Serial.printf("[SHUTTER] Frame snapped in %lu ms BEFORE Wi-Fi (%u bytes, %dx%d)\n",
+                shutterDuration, fb->len, fb->width, fb->height);
 
-  int frameCount = 1;
-  bool motionActive = true;
-
-  while (motionActive && (frameCount <= MAX_ALERT_FRAMES)) {
-    unsigned long cycleStart = millis();
-    Serial.printf("\n--- Capturing Motion Alert #%d of %d ---\n", frameCount,
-                  MAX_ALERT_FRAMES);
-
-    // 1. Capture snapshot immediately (instant shutter)
-    camera_fb_t *fb = nullptr;
-    String base64Image = captureAndEncodeJPEG(&fb);
-    if (!base64Image.isEmpty() && fb != nullptr) {
-      Serial.printf("Captured frame: %u bytes (%dx%d) — Free heap: %u bytes\n",
-                    fb->len, fb->width, fb->height, ESP.getFreeHeap());
-
-      // 2. Call Gemini API + parse response
-      String geminiResponse = callGeminiAPI(base64Image);
-      String summary, urgency;
-      parseGeminiResponse(geminiResponse, summary, urgency);
-      Serial.println("Gemini summary: " + summary + " [" + urgency + "]");
-
-      // 3. Send Telegram photo with unified caption
-      String emoji = "🟢";
-      if (urgency == "low")
-        emoji = "🟡";
-      else if (urgency == "medium")
-        emoji = "🟠";
-      else if (urgency == "high")
-        emoji = "🔴";
-
-      String caption = emoji + " Door Alert [" + urgency + "]\n\n" + summary;
-      sendTelegramPhoto(fb, caption);
-
-      // 4. Release frame buffer
-      esp_camera_fb_return(fb);
-    } else {
-      Serial.println("Capture/encode failed");
-      if (fb)
-        esp_camera_fb_return(fb);
-    }
-
-    frameCount++;
-
-    if (frameCount > MAX_ALERT_FRAMES) {
-      Serial.printf(
-          "Reached maximum alert limit (%d frames). Ending active cycle.\n",
-          MAX_ALERT_FRAMES);
-      break;
-    }
-
-    // 5. Wait for the remainder of PIR_CAPTURE_INTERVAL_MS while checking PIR
-    Serial.printf("Waiting %d ms interval for next check...\n",
-                  PIR_CAPTURE_INTERVAL_MS);
-    while (millis() - cycleStart < PIR_CAPTURE_INTERVAL_MS) {
-      delay(100);
-    }
-
-    // 6. Check if PIR is still HIGH
-    if (digitalRead(PIR_GPIO) == HIGH) {
-      Serial.printf("Checking PIR sensor (GPIO%d): HIGH (Motion ongoing)\n",
-                    PIR_GPIO);
-      continue;
-    }
-
-    Serial.println("PIR went LOW — verifying motion stopped (debounce)...");
-
-    // Debounce verification to prevent false sleep during a brief pause
-    delay(SLEEP_DEBOUNCE_MS);
-    if (digitalRead(PIR_GPIO) == HIGH) {
-      Serial.println(
-          "PIR became active again during debounce — continuing motion loop");
-      continue;
-    }
-
-    motionActive = false;
+  // 2. CONNECT TO WIFI while frame is held safe in PSRAM
+  setSystemState(STATE_WIFI_CONNECTING);
+  unsigned long wifiStart = millis();
+  if (!connectWiFi()) {
+    setSystemState(STATE_ERROR);
+    Serial.println("[WIFI] Connection failed — exiting motion cycle");
+    esp_camera_fb_return(fb);
+    return;
   }
+  unsigned long wifiDuration = millis() - wifiStart;
+  Serial.printf("[WIFI] Connected in %lu ms (IP: %s, RSSI: %d dBm)\n",
+                wifiDuration, WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  Serial.printf("Motion cycle finished. Entering %d ms quiet cooldown with "
-                "Wi-Fi OFF...\n",
+  // 3. CALL GEMINI API
+  setSystemState(STATE_GEMINI_CALL);
+  unsigned long geminiStart = millis();
+  String geminiResponse = callGeminiAPI(base64Image);
+  unsigned long geminiDuration = millis() - geminiStart;
+
+  String summary, urgency;
+  parseGeminiResponse(geminiResponse, summary, urgency);
+  Serial.printf("[GEMINI] Completed in %lu ms: %s [%s]\n",
+                geminiDuration, summary.c_str(), urgency.c_str());
+
+  // 4. SEND TELEGRAM ALERT WITH FULL DIAGNOSTICS & TELEMETRY
+  setSystemState(STATE_TELEGRAM_SEND);
+  unsigned long tgStart = millis();
+
+  String emoji = "🟢";
+  if (urgency == "low")
+    emoji = "🟡";
+  else if (urgency == "medium")
+    emoji = "🟠";
+  else if (urgency == "high")
+    emoji = "🔴";
+
+  unsigned long totalActiveMs = millis() - cycleStart;
+
+  String caption = emoji + " Door Alert [" + urgency + "]\n\n" +
+                   summary + "\n\n" +
+                   "⏱️ System Telemetry:\n" +
+                   "• Shutter Lag: " + String(shutterDuration) + " ms (Instant Pre-WiFi)\n" +
+                   "• Wi-Fi Link: " + String(wifiDuration) + " ms\n" +
+                   "• Gemini AI: " + String(geminiDuration) + " ms\n" +
+                   "• Total Active: " + String(totalActiveMs / 1000.0, 1) + " s\n" +
+                   "• PIR Sensor Pin: " + (digitalRead(PIR_GPIO) == HIGH ? "HIGH (Ongoing)" : "LOW (Cleared)");
+
+  sendTelegramPhoto(fb, caption);
+  unsigned long tgDuration = millis() - tgStart;
+  Serial.printf("[TELEGRAM] Photo sent in %lu ms\n", tgDuration);
+
+  // 5. Release frame buffer
+  esp_camera_fb_return(fb);
+
+  // 6. Enter RF Cooldown with Wi-Fi radio OFF
+  setSystemState(STATE_COOLDOWN);
+  Serial.printf("[COOLDOWN] Entering %d ms quiet cooldown with Wi-Fi OFF...\n",
                 MOTION_COOLDOWN_MS);
-  // Power down WiFi radio immediately so 2.4GHz RF radiation stops completely
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(MOTION_COOLDOWN_MS);
+
+  // 7. Verify PIR dropped LOW — if still HIGH, alert user with Triple Flash
+  if (digitalRead(PIR_GPIO) == HIGH) {
+    setSystemState(STATE_PIR_WAIT_CLEAR);
+    Serial.println("[PIR] Sensor is still HIGH after cooldown! Waiting for sensor to clear...");
+    unsigned long waitStart = millis();
+    while (digitalRead(PIR_GPIO) == HIGH) {
+      delay(200);
+      if (millis() - waitStart > 8000) {
+        Serial.println("[PIR] Warning: Sensor held HIGH > 8s. Check Time-Delay dial (turn counter-clockwise).");
+        break;
+      }
+    }
+  }
+
+  Serial.println("=======================================================\n");
+  setSystemState(STATE_SLEEPING);
 }
 
 void loop() {
@@ -334,15 +437,10 @@ bool connectWiFi() {
 // Capture JPEG + Base64 Encode
 // ===========================================================================
 String captureAndEncodeJPEG(camera_fb_t **fb_out) {
-  Serial.println("Stabilizing sensor & capturing fresh frame...");
-
-  // Discard initial frames to let AEC/AWB converge and clear stale DMA buffer
-  // (prevents smearing)
-  for (int i = 0; i < 4; i++) {
-    camera_fb_t *dummy = esp_camera_fb_get();
-    if (dummy)
-      esp_camera_fb_return(dummy);
-    delay(40);
+  // Flush 1 stale DMA buffer frame for instant shutter response
+  camera_fb_t *dummy = esp_camera_fb_get();
+  if (dummy) {
+    esp_camera_fb_return(dummy);
   }
 
   camera_fb_t *fb = nullptr;
@@ -350,16 +448,16 @@ String captureAndEncodeJPEG(camera_fb_t **fb_out) {
     fb = esp_camera_fb_get();
     if (fb)
       break;
-    Serial.printf("Attempt %d returned null, retrying in 200ms...\n", attempt);
-    delay(200);
+    Serial.printf("[SHUTTER] Null frame on attempt %d, retrying in 40ms...\n", attempt);
+    delay(40);
   }
 
   if (!fb) {
-    Serial.println("Camera capture failed completely");
+    Serial.println("[SHUTTER] Camera capture failed completely");
     return "";
   }
   *fb_out = fb;
-  Serial.printf("Captured frame: %u bytes (%dx%d)\n", fb->len, fb->width,
+  Serial.printf("[SHUTTER] Captured: %u bytes (%dx%d)\n", fb->len, fb->width,
                 fb->height);
 
   // Calculate Base64 output size and allocate buffer in PSRAM if available
@@ -669,24 +767,28 @@ bool sendTelegramMessage(const String &text) {
 // Sleep Mode (PIR-Armed: Wakes on GPIO13 HIGH)
 // ===========================================================================
 void goToSleep() {
+  setSystemState(STATE_SLEEPING);
   Serial.println("\n=== Entering Sleep Mode ===");
-  Serial.println("Powering down WiFi radio...");
 
-  // Disconnect WiFi to eliminate idle power consumption
+  // Ensure WiFi is completely powered down
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
   // Ensure PIR signal is truly LOW before arming interrupt
-  // (Prevents instant re-trigger with a 10-second safety timeout)
+  // If armed while HIGH, ESP32 ext0 fires instantly (0ms loop!)
   unsigned long waitLowStart = millis();
   while (digitalRead(PIR_GPIO) == HIGH) {
-    if (millis() - waitLowStart > 10000) {
-      Serial.println("PIR remained HIGH for 10s — proceeding to arm wakeup");
+    setSystemState(STATE_PIR_WAIT_CLEAR);
+    if (millis() - waitLowStart > 8000) {
+      Serial.println("[SLEEP] Warning: PIR remained HIGH for 8s (check Time-Delay dial) — arming wakeup");
       break;
     }
-    Serial.println("PIR still HIGH, waiting for sensor to clear...");
-    delay(300);
+    Serial.println("[SLEEP] PIR still HIGH, waiting for sensor to clear...");
+    delay(250);
   }
+
+  setSystemState(STATE_SLEEPING);
+  digitalWrite(STATUS_LED_GPIO, HIGH); // Explicitly ensure LED is OFF
 
   // Arm PIR on GPIO13 as ext0 wakeup source
   rtc_gpio_pullup_dis(PIR_GPIO);
@@ -695,11 +797,11 @@ void goToSleep() {
 
 #if USE_LIGHT_SLEEP
   Serial.println(
-      "Entering Light Sleep (Instant wake <10ms, RAM & camera preserved)...");
+      "[SLEEP] Entering Light Sleep (Instant wake <10ms, RAM & camera preserved)...");
   Serial.flush();
   esp_light_sleep_start();
 #else
-  Serial.println("Entering Deep Sleep (wakes on PIR HIGH or RST button)...");
+  Serial.println("[SLEEP] Entering Deep Sleep (wakes on PIR HIGH or RST button)...");
   Serial.flush();
   esp_deep_sleep_start();
 #endif
