@@ -46,7 +46,8 @@
 #define USE_LIGHT_SLEEP true
 
 #define GEMINI_HOST "generativelanguage.googleapis.com"
-#define GEMINI_MODEL "gemini-3.8-flash"
+#define GEMINI_MODEL "gemini-3.5-flash"
+#define GEMINI_MODEL_FALLBACK "gemini-3.7-flash"
 #define TELEGRAM_HOST "api.telegram.org"
 
 // ---------------------------------------------------------------------------
@@ -560,42 +561,51 @@ String callGeminiAPI(const String &base64Image) {
   body += schema;
   body += "}}";
 
-  String url = "https://" + String(GEMINI_HOST) + "/v1beta/models/" +
-               GEMINI_MODEL + ":generateContent";
+  const char *modelsToTry[] = {GEMINI_MODEL, GEMINI_MODEL_FALLBACK};
+  const int NUM_MODELS = 2;
 
-  Serial.printf("Sending to Gemini (%u bytes)...\n", body.length());
+  for (int m = 0; m < NUM_MODELS; m++) {
+    String modelName = modelsToTry[m];
+    String url = "https://" + String(GEMINI_HOST) + "/v1beta/models/" +
+                 modelName + ":generateContent";
 
-  const int MAX_ATTEMPTS = 3;
-  for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    WiFiClientSecure client; // Fresh TLS session each attempt
-    client.setInsecure();
-    client.setTimeout(30);
+    Serial.printf("Sending to Gemini [%s] (%u bytes)...\n", modelName.c_str(), body.length());
 
-    HTTPClient http;
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-goog-api-key", GEMINI_API_KEY);
-    http.setTimeout(30000);
+    for (int attempt = 1; attempt <= 2; attempt++) {
+      WiFiClientSecure client; // Fresh TLS session each attempt
+      client.setInsecure();
+      client.setTimeout(12);
 
-    int httpCode = http.POST(body);
+      HTTPClient http;
+      http.begin(client, url);
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("x-goog-api-key", GEMINI_API_KEY);
+      http.setTimeout(12000); // 12-second timeout prevents 40+ second stalls
 
-    if (httpCode == 200) {
-      String response = http.getString();
+      int httpCode = http.POST(body);
+
+      if (httpCode == 200) {
+        String response = http.getString();
+        http.end();
+        Serial.printf("Gemini [%s] responded OK\n", modelName.c_str());
+        return response;
+      }
+
+      Serial.printf("Gemini [%s] HTTP error: %d (attempt %d)\n", modelName.c_str(), httpCode, attempt);
+      Serial.println(http.getString().substring(0, 200));
       http.end();
-      Serial.println("Gemini responded OK");
-      return response;
+
+      // If 429 quota exhausted or 404 model not found, fail over to fallback model immediately!
+      if (httpCode == 429 || httpCode == 404) {
+        Serial.printf("Gemini [%s] hit quota or invalid model — failing over to next model...\n", modelName.c_str());
+        break;
+      }
+
+      // If temporary 500/502/503/504 server demand spike, wait 1.5s
+      bool temporary = (httpCode == 500 || httpCode == 502 || httpCode == 503 || httpCode == 504 || httpCode < 0);
+      if (!temporary || attempt == 2) break;
+      delay(1500);
     }
-
-    Serial.printf("Gemini HTTP error: %d (attempt %d/%d)\n", httpCode, attempt, MAX_ATTEMPTS);
-    Serial.println(http.getString().substring(0, 300));
-    http.end();
-
-    bool temporary = (httpCode == 429 || httpCode == 500 ||
-                      httpCode == 502 || httpCode == 503 || httpCode == 504 ||
-                      httpCode < 0);
-    if (!temporary || attempt == MAX_ATTEMPTS) break;
-
-    delay(attempt * 2000); // 2s, then 4s
   }
 
   return "";
@@ -608,8 +618,7 @@ String callGeminiAPI(const String &base64Image) {
 // ===========================================================================
 void parseGeminiResponse(const String &jsonResponse, String &summary,
                          String &urgency) {
-  summary = "Door activity captured. (Gemini cloud AI was temporarily busy "
-            "under high demand).";
+  summary = "Door activity captured. (Gemini cloud quota reached or AI temporarily busy).";
   urgency = "low";
   if (jsonResponse.isEmpty())
     return;
