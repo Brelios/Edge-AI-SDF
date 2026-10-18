@@ -161,27 +161,27 @@ bool processTelegramCommands(bool& motionEnabled) {
         Serial.printf("[Telegram] Command from @%s: %s\n", username, cmd.c_str());
 
         // ---------------------------------------------------------------
-        // /snap — Instantly capture and send a live HD snapshot
+        // /snap — Instantly capture and send a live HD photo (no Gemini)
         // ---------------------------------------------------------------
         if (cmd == "/snap") {
-            sendTelegramMessage("📸 Capturing snapshot...");
+            // Guard: need at least 80KB free to safely allocate the Telegram multipart buffer
+            if (ESP.getFreeHeap() < 80000) {
+                sendTelegramMessage("⚠️ Snap unavailable — low memory (" +
+                                    String(ESP.getFreeHeap() / 1024) + " KB free). Try again shortly.");
+                updateOffset = updateId + 1;
+                continue;
+            }
 
-            camera_fb_t* fb = nullptr;
-            String base64 = captureAndEncodeJPEG(&fb);
-
-            if (!base64.isEmpty() && fb != nullptr) {
-                String caption =
-                    "📸 *Live Snap* — On-Demand Snapshot\n\n"
-                    "📶 Wi-Fi: " + String(WiFi.RSSI()) + " dBm\n"
-                    "🧠 Free Heap: " + String(ESP.getFreeHeap() / 1024) + " KB\n"
-                    "⏱ Uptime: " + String(millis() / 60000) + " min\n"
-                    "🛡 Motion alerts: " + String(motionEnabled ? "Active" : "Paused");
+            // Raw JPEG capture — no base64, no Gemini, instant dispatch
+            camera_fb_t* fb = captureJPEG();
+            if (fb) {
+                String caption = "📸 Live Snap  •  " + String(fb->width) + "×" + String(fb->height) +
+                                 "  |  📶 " + String(WiFi.RSSI()) + " dBm";
                 sendTelegramPhoto(fb, caption);
                 esp_camera_fb_return(fb);
                 snapped = true;
             } else {
-                sendTelegramMessage("❌ Snapshot failed — camera unavailable.");
-                if (fb) esp_camera_fb_return(fb);
+                sendTelegramMessage("❌ Snap failed — camera unavailable. Check Serial Monitor.");
             }
         }
 

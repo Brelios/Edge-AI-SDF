@@ -83,6 +83,39 @@ bool initCamera() {
     return true;
 }
 
+camera_fb_t* captureJPEG() {
+    // Restore HD JPEG mode — motion detector may have left sensor in QQVGA grayscale
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) {
+        s->set_framesize(s, FRAMESIZE_HD);
+        s->set_pixformat(s, PIXFORMAT_JPEG);
+    }
+
+    // Discard two stale frames to flush DMA and let AWB/AEC settle after mode switch
+    for (int i = 0; i < 2; i++) {
+        camera_fb_t* flush = esp_camera_fb_get();
+        if (flush) esp_camera_fb_return(flush);
+        delay(40);
+    }
+
+    // Capture with up to 3 retries
+    camera_fb_t* fb = nullptr;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        fb = esp_camera_fb_get();
+        if (fb) break;
+        Serial.printf("[captureJPEG] Attempt %d null — retrying in 150ms...\n", attempt);
+        delay(150);
+    }
+
+    if (!fb) {
+        Serial.println("[captureJPEG] Capture failed after 3 attempts");
+        return nullptr;
+    }
+
+    Serial.printf("[captureJPEG] Frame: %u bytes (%dx%d)\n", fb->len, fb->width, fb->height);
+    return fb;
+}
+
 String captureAndEncodeJPEG(camera_fb_t** fb_out) {
     Serial.println("Stabilizing sensor & capturing fresh frame...");
 
