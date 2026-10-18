@@ -23,8 +23,8 @@
 // Motion Detection Configuration (Optical JPEG + Hardware PIR)
 // ---------------------------------------------------------------------------
 // Combined score threshold (0.0–1.0) that must be exceeded to trigger an optical alert.
-// 0.08 = ~8% combined size & entropy change
-#define MOTION_SENSITIVITY         0.08f
+// 0.15 = 15% combined size & entropy change (rejects sensor noise, reliably detects humans)
+#define MOTION_SENSITIVITY         0.15f
 
 // Minimum milliseconds between successive Gemini/Telegram alerts.
 #define MOTION_COOLDOWN_MS         12000              // 12 seconds between alert cycles

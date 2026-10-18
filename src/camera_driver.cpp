@@ -3,7 +3,7 @@
 #include "mbedtls/base64.h"
 
 framesize_t getTargetFrameSize() {
-    return psramFound() ? FRAMESIZE_HD : FRAMESIZE_QVGA;
+    return psramFound() ? FRAMESIZE_HD : FRAMESIZE_VGA;
 }
 
 bool initCamera() {
@@ -47,14 +47,14 @@ bool initCamera() {
         config.xclk_freq_hz = 20000000;
         config.jpeg_buffer_size = 0;
     } else {
-        Serial.println("[Camera] No PSRAM — using DRAM with 10MHz clock, QVGA (320x240), and 32KB buffer");
-        config.frame_size   = FRAMESIZE_QVGA;       // 320x240 fits reliably in DRAM
-        config.jpeg_quality = 14;                  // Quality 14 gives clean sharp image (~12-16KB)
+        Serial.println("[Camera] No PSRAM — using DRAM with 10MHz clock, VGA (640x480), and 48KB buffer");
+        config.frame_size   = FRAMESIZE_VGA;       // 640x480 gives 4x pixel clarity in DRAM
+        config.jpeg_quality = 14;                  // Quality 14 gives clean sharp image (~18-24KB)
         config.fb_count     = 1;                   // Single buffer saves precious DRAM
         config.fb_location  = CAMERA_FB_IN_DRAM;
         config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
         config.xclk_freq_hz = 10000000;             // 10 MHz prevents bus overrun
-        config.jpeg_buffer_size = 32768;           // 32 KB buffer (prevents FB-OVF)
+        config.jpeg_buffer_size = 49152;           // 48 KB buffer (fits VGA frames reliably)
     }
 
     esp_err_t err = esp_camera_init(&config);

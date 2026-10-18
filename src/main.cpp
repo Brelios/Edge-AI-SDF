@@ -64,6 +64,9 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     Serial.printf("[Alert] Dispatch complete! [Timing Breakdown] AI: %ums | Upload: %ums | Total: %ums\n",
                   g_metrics.lastAiLatencyMs, g_metrics.lastUploadLatencyMs,
                   g_metrics.lastAiLatencyMs + g_metrics.lastUploadLatencyMs);
+
+    // Re-seed motion baseline with settled post-alert background
+    resetMotionBaseline();
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +100,7 @@ void setup() {
     initMotionDetector();
 
     // Step 5: Announce readiness on Telegram
-    String resStr = psramFound() ? "OV2640 HD (1280×720)" : "OV2640 QVGA (320×240)";
+    String resStr = psramFound() ? "OV2640 HD (1280×720)" : "OV2640 VGA (640×480)";
     String bootMsg =
         "🟢 *Edge AI Door Feed — Online*\n"
         "─────────────────────────\n"
@@ -148,6 +151,7 @@ void loop() {
             if (canAlert) {
                 dispatchAlert(motionFb, "motion");
             } else {
+                adaptMotionBaseline(motionFb->len);
                 Serial.printf("[Motion] Cooling down (%lus remaining).\n",
                               (unsigned long)((MOTION_COOLDOWN_MS - (now - lastAlertMs)) / 1000));
                 esp_camera_fb_return(motionFb);

@@ -49,8 +49,16 @@ static const char schemaJson[] =
     "\"actions\":{\"type\":\"ARRAY\",\"items\":{\"type\":\"STRING\"}}"
     "},\"required\":[\"summary\",\"category\",\"urgency\",\"people\",\"packages\",\"vehicles\",\"image_quality\",\"actions\"]}";
 
+static unsigned long lastQuotaExceededMs = 0;
+
 String callGeminiAPI(camera_fb_t* fb) {
     if (!fb || !fb->buf || fb->len == 0) return "";
+
+    // Fast-fail circuit breaker: if quota was exceeded, wait 60s before hammering API again
+    if (lastQuotaExceededMs > 0 && (millis() - lastQuotaExceededMs < 60000)) {
+        Serial.println("[Gemini] Quota cooldown active (60s circuit-breaker) — bypassing cloud call.");
+        return "";
+    }
 
     String jsonPre =
         "{\"system_instruction\":{\"parts\":[{\"text\":\"" + String(systemPrompt) + "\"}]},"
@@ -124,10 +132,15 @@ String callGeminiAPI(camera_fb_t* fb) {
         if (httpCode != 200) {
             Serial.printf("[Gemini] %s HTTP error: %d\n", modelName, httpCode);
             client.stop();
-            if (httpCode == 429 || httpCode == 404 || httpCode == 503) {
+            if (httpCode == 429) {
+                lastQuotaExceededMs = millis();
+                g_metrics.lastAiLatencyMs = millis() - aiStart;
+                Serial.println("[Gemini] Quota exceeded (HTTP 429) — aborting fallback cascade to prevent latency hang.");
+                break; // Fast fail: all models in project share same quota, do NOT cascade!
+            } else if (httpCode == 404 || httpCode == 503) {
                 currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
                 Serial.printf("[Gemini] Cascading to fallback model: %s\n", GEMINI_MODELS[currentModelIdx]);
-                delay(500);
+                delay(200);
             } else {
                 break;
             }
@@ -239,9 +252,12 @@ String callGeminiAPI(const String& base64Image) {
 
         if (httpCode != 200) {
             client.stop();
-            if (httpCode == 429 || httpCode == 404 || httpCode == 503) {
+            if (httpCode == 429) {
+                lastQuotaExceededMs = millis();
+                break;
+            } else if (httpCode == 404 || httpCode == 503) {
                 currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
-                delay(500);
+                delay(200);
             } else {
                 break;
             }
