@@ -19,36 +19,46 @@ String callGeminiAPI(const String& base64Image) {
     http.addHeader("x-goog-api-key", GEMINI_API_KEY);
     http.setTimeout(30000);
 
-    // System prompt — plain ASCII, no embedded double-quotes
+    // Advanced security guard system prompt — plain ASCII, single quotes only
     static const char* systemPrompt =
-        "You are a front-door security camera assistant. You receive one still image "
-        "from an HD door camera (1280x720). "
-        "Describe only what is clearly visible and never guess about anything you cannot make out. "
-        "Do not identify anyone by name; use neutral descriptions such as clothing or what they carry. "
-        "If nothing notable is happening, use the summary No activity at the door, urgency none, and an empty actions list. "
-        "If the image is too dark, blurry, or blocked, set image_quality to poor and say so in the summary. "
-        "Urgency guide: none = empty scene; low = a delivery or passerby; "
-        "medium = someone lingering, trying the door, or covering their face; "
-        "high = forced entry, weapons, or an apparent emergency. "
-        "Give at most 3 actions, each under 10 words.";
+        "You are an autonomous AI doorstep security assistant for a home entrance camera. "
+        "Analyze the provided single still frame from the front door camera. "
+        "Provide a factual, objective, and accurate assessment. Never assume intent or invent details not clearly visible. "
+        "Do not use conversational filler (such as 'In this image' or 'We see'); start directly with the subject. "
+        "CATEGORIZATION: "
+        "- delivery: couriers with uniforms, safety vests, scanner devices, packages, mailers, or parcel drop-offs. "
+        "- resident_visitor: people approaching normally, knocking, ringing the bell, or entering/exiting peacefully. "
+        "- suspicious: loitering without knocking/ringing, face deliberately concealed (hood/mask/gaiter), window peering, or hesitant night lingering. "
+        "- threat: forced entry, tampering with door locks/handles, visible weapons or tools, aggressive actions, or package theft in progress. "
+        "- animal: pets (dogs, cats) or wildlife in the field of view. "
+        "- false_alarm: empty doorstep, tree branches swaying in wind, moving shadows, vehicle headlights, glare, or insects/rain on the lens. "
+        "URGENCY: "
+        "- none: false alarms, empty scene, harmless wildlife, or ambient motion. "
+        "- low: routine parcel delivery, resident arrival/departure, or familiar visitor. "
+        "- medium: unfamiliar person loitering, peering in windows, or concealing identity. "
+        "- high: active break-in attempt, lock manipulation, package theft, or immediate hazard. "
+        "SUMMARY: Exactly 1 to 2 clear, concise sentences. "
+        "IMAGE QUALITY: 'poor' if too dark, blurry, or blocked; otherwise 'good'. "
+        "ACTIONS: 1 to 2 imperative suggestions under 8 words each (e.g., 'Retrieve package', 'Verify door lock', 'None required').";
 
-    // responseSchema forces Gemini to return strict JSON
+    // responseSchema forces Gemini 3.8 Flash to return strict JSON matching this structure
     static const char* schema = R"json({
       "type": "OBJECT",
       "properties": {
         "summary":       { "type": "STRING" },
+        "category":      { "type": "STRING", "enum": ["delivery", "resident_visitor", "suspicious", "threat", "animal", "false_alarm"] },
+        "urgency":       { "type": "STRING", "enum": ["none", "low", "medium", "high"] },
         "people":        { "type": "INTEGER" },
         "packages":      { "type": "INTEGER" },
         "vehicles":      { "type": "INTEGER" },
-        "urgency":       { "type": "STRING", "enum": ["none", "low", "medium", "high"] },
         "image_quality": { "type": "STRING", "enum": ["good", "poor"] },
         "actions":       { "type": "ARRAY", "items": { "type": "STRING" } }
       },
-      "required": ["summary", "people", "packages", "vehicles", "urgency", "image_quality", "actions"]
+      "required": ["summary", "category", "urgency", "people", "packages", "vehicles", "image_quality", "actions"]
     })json";
 
     String body;
-    body.reserve(base64Image.length() + 2500);
+    body.reserve(base64Image.length() + 3500);
 
     body  = "{\"system_instruction\":{\"parts\":[{\"text\":\"";
     body += systemPrompt;
@@ -73,9 +83,9 @@ String callGeminiAPI(const String& base64Image) {
         Serial.println(http.getString().substring(0, 300));
         http.end();
 
-        // If temporary 503 high demand spike, retry once after 2 seconds
-        if (httpCode == 503) {
-            Serial.println("Gemini 503 (high demand) — retrying once in 2s...");
+        // Retry once after 2 seconds if temporary 503 (high demand) or 429 (rate spike)
+        if (httpCode == 503 || httpCode == 429) {
+            Serial.printf("Gemini %d (busy/rate limit) — retrying once in 2s...\n", httpCode);
             delay(2000);
             http.begin(client, url);
             http.addHeader("Content-Type", "application/json");
@@ -100,13 +110,19 @@ String callGeminiAPI(const String& base64Image) {
     return response;
 }
 
-void parseGeminiResponse(const String& jsonResponse,
-                         String& summary, String& urgency) {
-    summary = "Door activity captured. (Gemini cloud AI was temporarily busy under high demand).";
-    urgency = "low";
-    if (jsonResponse.isEmpty()) return;
+GeminiAnalysis parseGeminiResponse(const String& jsonResponse) {
+    GeminiAnalysis analysis;
 
-    // Filter-parse outer Gemini envelope, keeping only inner text field
+    if (jsonResponse.isEmpty()) {
+        analysis.summary = "Motion detected at front door. (Gemini cloud AI temporarily busy or unavailable).";
+        analysis.category = "suspicious";
+        analysis.urgency = "low";
+        analysis.image_quality = "good";
+        analysis.success = false;
+        return analysis;
+    }
+
+    // Filter outer envelope to minimize RAM usage in ArduinoJson
     JsonDocument filter;
     filter["candidates"][0]["content"]["parts"][0]["text"] = true;
 
@@ -115,13 +131,21 @@ void parseGeminiResponse(const String& jsonResponse,
                                                DeserializationOption::Filter(filter));
     if (err) {
         Serial.println("Gemini outer parse error: " + String(err.c_str()));
-        return;
+        analysis.summary = "Door activity captured (Failed to parse outer AI envelope).";
+        analysis.category = "suspicious";
+        analysis.urgency = "low";
+        analysis.success = false;
+        return analysis;
     }
 
     const char* innerText = outer["candidates"][0]["content"]["parts"][0]["text"];
     if (!innerText) {
         Serial.println("Gemini: unexpected envelope shape");
-        return;
+        analysis.summary = "Door activity captured (Empty AI response parts).";
+        analysis.category = "suspicious";
+        analysis.urgency = "low";
+        analysis.success = false;
+        return analysis;
     }
 
     // Parse structured JSON returned by Gemini
@@ -129,21 +153,122 @@ void parseGeminiResponse(const String& jsonResponse,
     err = deserializeJson(result, innerText);
     if (err) {
         Serial.println("Gemini inner parse error: " + String(err.c_str()));
-        summary = String(innerText);
-        return;
+        analysis.summary = String(innerText);
+        analysis.category = "resident_visitor";
+        analysis.urgency = "low";
+        analysis.success = false;
+        return analysis;
     }
 
-    summary = result["summary"] | "No summary provided.";
-    urgency = result["urgency"] | "none";
+    analysis.summary       = result["summary"] | "Activity detected at front door.";
+    analysis.category      = result["category"] | "resident_visitor";
+    analysis.urgency       = result["urgency"] | "none";
+    analysis.people        = result["people"] | 0;
+    analysis.packages      = result["packages"] | 0;
+    analysis.vehicles      = result["vehicles"] | 0;
+    analysis.image_quality = result["image_quality"] | "good";
+    analysis.success       = true;
 
-    Serial.printf("  people=%d  packages=%d  vehicles=%d  quality=%s\n",
-                  (int)result["people"],
-                  (int)result["packages"],
-                  (int)result["vehicles"],
-                  (const char*)result["image_quality"]);
-
-    JsonArray actions = result["actions"].as<JsonArray>();
-    for (JsonVariant a : actions) {
-        Serial.println("  action: " + String(a.as<const char*>()));
+    JsonArray actionsArr = result["actions"].as<JsonArray>();
+    for (JsonVariant a : actionsArr) {
+        if (a.is<const char*>()) {
+            analysis.actions.push_back(String(a.as<const char*>()));
+        }
     }
+
+    Serial.printf("Gemini parsed: category=%s  urgency=%s  people=%d  packages=%d  vehicles=%d  quality=%s\n",
+                  analysis.category.c_str(),
+                  analysis.urgency.c_str(),
+                  analysis.people,
+                  analysis.packages,
+                  analysis.vehicles,
+                  analysis.image_quality.c_str());
+
+    for (const String& act : analysis.actions) {
+        Serial.println("  action: " + act);
+    }
+
+    return analysis;
 }
+
+void parseGeminiResponse(const String& jsonResponse,
+                         String& summary, String& urgency) {
+    GeminiAnalysis a = parseGeminiResponse(jsonResponse);
+    summary = a.summary;
+    urgency = a.urgency;
+}
+
+String formatTelegramCaption(const GeminiAnalysis& analysis) {
+    if (!analysis.success && analysis.summary.indexOf("temporarily busy") != -1) {
+        return "⚠️ Door Motion Alert\n\n" + analysis.summary;
+    }
+
+    String headerIcon = "🔔";
+    String catTitle = "Door Event";
+
+    if (analysis.category == "threat") {
+        headerIcon = "🚨";
+        catTitle = "Threat";
+    } else if (analysis.category == "suspicious") {
+        headerIcon = "👁️";
+        catTitle = "Suspicious Activity";
+    } else if (analysis.category == "delivery") {
+        headerIcon = "📦";
+        catTitle = "Delivery";
+    } else if (analysis.category == "resident_visitor") {
+        headerIcon = "👤";
+        catTitle = "Visitor / Resident";
+    } else if (analysis.category == "animal") {
+        headerIcon = "🐾";
+        catTitle = "Animal";
+    } else if (analysis.category == "false_alarm") {
+        headerIcon = "🍃";
+        catTitle = "Ambient Motion";
+    }
+
+    String urgencyUpper = analysis.urgency;
+    urgencyUpper.toUpperCase();
+
+    String caption = headerIcon + " Door Alert [" + urgencyUpper + "] • " + catTitle + "\n\n";
+    caption += analysis.summary + "\n\n";
+
+    // Entity counts line
+    String entities = "";
+    if (analysis.people > 0 || analysis.category == "resident_visitor" ||
+        analysis.category == "suspicious" || analysis.category == "threat") {
+        entities += "👥 People: " + String(analysis.people) + "  ";
+    }
+    if (analysis.packages > 0 || analysis.category == "delivery") {
+        entities += "📦 Packages: " + String(analysis.packages) + "  ";
+    }
+    if (analysis.vehicles > 0) {
+        entities += "🚗 Vehicles: " + String(analysis.vehicles);
+    }
+    if (!entities.isEmpty()) {
+        caption += entities + "\n";
+    }
+
+    // Recommended actions
+    if (!analysis.actions.empty()) {
+        if (analysis.actions.size() == 1) {
+            caption += "💡 Action: " + analysis.actions[0] + "\n";
+        } else {
+            caption += "💡 Actions:\n";
+            for (size_t i = 0; i < analysis.actions.size(); i++) {
+                caption += "• " + analysis.actions[i] + "\n";
+            }
+        }
+    }
+
+    if (analysis.image_quality == "poor") {
+        caption += "\n⚠️ Image Quality: Poor (Check lighting/lens)";
+    }
+
+    // Keep well within Telegram's 1024-char photo caption limit
+    if (caption.length() > 1000) {
+        caption = caption.substring(0, 995) + "...";
+    }
+
+    return caption;
+}
+

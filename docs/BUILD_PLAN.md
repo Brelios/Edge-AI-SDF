@@ -238,29 +238,32 @@ Rather than firing an isolated snapshot and going blind for 30 seconds, the v1.0
 
 ### 6.4 Gemini 3.8 Flash Multimodal API
 * **Endpoint:** `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent`
-* **Security Prompt:** Instructs model to produce neutral, concise observations of people, packages, vehicles, and urgency.
-* **Schema Enforcement:** Strict JSON schema guarantees machine-parsable properties:
+* **Security Prompt:** Instructs model with autonomous security guard guidelines: neutral, active-voice observations, strict false-alarm rejection (ambient motion, headlights, swaying foliage), courier identification, and loitering detection.
+* **Schema Enforcement:** Strict OpenAPI response schema guarantees machine-parsable properties:
   ```json
   {
-    "summary": "Delivery courier in blue vest placing cardboard box on doorstep.",
+    "summary": "Courier in reflective vest placed a parcel on the front porch and walked away.",
+    "category": "delivery",
+    "urgency": "low",
     "people": 1,
     "packages": 1,
     "vehicles": 0,
-    "urgency": "low",
     "image_quality": "good",
-    "actions": ["Notify homeowner", "Log delivery event"]
+    "actions": ["Retrieve package from front step"]
   }
   ```
-* **Resilience:** Automatic retry after 2 seconds on HTTP 503 high-demand conditions.
+* **Resilience:** Automatic retry after 2 seconds on HTTP 503 (high demand) or 429 (rate spike) conditions.
 
 ### 6.5 Telegram Multipart Dispatch
 * Dispatches directly to Telegram Bot API `/sendPhoto` using standard `multipart/form-data`.
 * Pre-allocates multipart payload in PSRAM buffer.
-* Automatically selects urgency emojis based on parsed Gemini classification:
-  * 🟢 `Door Alert [low]`
-  * 🟡 `Door Alert [moderate]`
-  * 🟠 `Door Alert [medium]`
-  * 🔴 `Door Alert [high]`
+* Automatically formats structured status cards with category badges, urgency levels, entity counters, and recommended actions:
+  * 📦 `📦 Door Alert [LOW] • Delivery`
+  * 👤 `👤 Door Alert [LOW] • Visitor / Resident`
+  * 👁️ `👁️ Door Alert [MEDIUM] • Suspicious Activity`
+  * 🚨 `🚨 Door Alert [HIGH] • Threat`
+  * 🐾 `🐾 Door Alert [NONE] • Animal`
+  * 🍃 `🍃 Door Alert [NONE] • Ambient Motion`
 
 ---
 

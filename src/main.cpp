@@ -65,20 +65,14 @@ void processMotionCycle() {
 
       // 2. Call Gemini API + parse response
       String geminiResponse = callGeminiAPI(base64Image);
-      String summary, urgency;
-      parseGeminiResponse(geminiResponse, summary, urgency);
-      Serial.println("Gemini summary: " + summary + " [" + urgency + "]");
+      // Free base64 string buffer (~80KB) immediately to reclaim heap before Telegram upload
+      base64Image = "";
 
-      // 3. Send Telegram photo with color-coded urgency caption
-      String emoji = "🟢";
-      if (urgency == "low")
-        emoji = "🟡";
-      else if (urgency == "medium")
-        emoji = "🟠";
-      else if (urgency == "high")
-        emoji = "🔴";
+      GeminiAnalysis analysis = parseGeminiResponse(geminiResponse);
+      Serial.println("Gemini summary: " + analysis.summary + " [" + analysis.urgency + " - " + analysis.category + "]");
 
-      String caption = emoji + " Door Alert [" + urgency + "]\n\n" + summary;
+      // 3. Format structured caption & send Telegram photo
+      String caption = formatTelegramCaption(analysis);
       sendTelegramPhoto(fb, caption);
 
       // 4. Release frame buffer

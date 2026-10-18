@@ -76,24 +76,28 @@ An ultra-responsive, event-driven smart door camera that sleeps at near-zero pow
 * **🔄 Active Motion Cycle:**
   Loops dynamically while motion is active (`PIR_CAPTURE_INTERVAL_MS = 4000`), sending progressive updates. Verifies a **1.5s debounce period** before re-entering sleep to prevent false alarms or missed activity.
 * **🤖 Gemini 3.8 Flash Multimodal Reasoning:**
-  Direct cloud multimodal analysis powered by `gemini-3.8-flash`. Enforces a strict JSON response schema returning:
-  * **Summary:** Clear, neutral natural-language description of visible events.
-  * **Entities:** Counts for `people`, `packages`, and `vehicles`.
-  * **Urgency:** Categorized urgency level (`none`, `low`, `medium`, `high`).
-  * **Actions:** Concrete suggested response actions.
-* **📸 Rich Telegram Alerts:**
-  Direct multipart/form-data upload dispatching the actual captured JPEG photo along with a formatted status caption and color-coded urgency indicators:
-  * 🟢 **Low:** Expected activity, standard deliveries, or passersby.
-  * 🟡 **Moderate:** Prolonged lingering or unidentified individuals.
-  * 🟠 **Medium:** Loitering, face concealment, or door handle testing.
-  * 🔴 **High:** Forced entry, weapons, or emergent hazards.
+  Direct cloud multimodal analysis powered by `gemini-3.8-flash`. Enforces a strict OpenAPI response schema returning:
+  * **Category:** Concrete classification (`delivery`, `resident_visitor`, `suspicious`, `threat`, `animal`, `false_alarm`).
+  * **Summary:** Direct 1–2 sentence factual summary without conversational filler.
+  * **Urgency:** Calibrated threat rating (`none`, `low`, `medium`, `high`).
+  * **Entities:** Discrete counts for `people`, `packages`, and `vehicles`.
+  * **Image Quality:** Automatic detection of lens occlusion, pitch darkness, or blur (`good`, `poor`).
+  * **Actions:** Top 1–2 imperative recommendations (under 8 words each).
+* **📸 Rich Telegram Status Cards:**
+  Direct multipart/form-data upload dispatching the actual captured JPEG photo alongside an engineered status card:
+  * 📦 **Delivery:** Courier identification, parcel counts, and pickup prompts.
+  * 👤 **Visitor / Resident:** Normal arrivals, bell rings, and family entries.
+  * 👁️ **Suspicious:** Loitering, face concealment, window peering, or hesitant night lurking.
+  * 🚨 **Threat:** Active break-in attempt, lock manipulation, package theft, or emergent hazards.
+  * 🐾 **Animal:** Pets or visiting wildlife.
+  * 🍃 **Ambient Motion:** Wind-blown foliage, shadow transitions, or vehicle headlight reflections.
 * **🎨 Hardware Image Optimization Pipeline:**
   Fine-tuned OV2640 ISP registers featuring hardware edge sharpening, auto white balance (AWB) gain, lens vignetting correction (`lenc`), black/white pixel correction, and a 4X gain ceiling to prevent slow-shutter motion smearing.
 * **🛡️ Adaptive Dual-Memory Pipeline:**
   * **PSRAM Detected:** Automatically provisions **HD (1280×720)** frames with double DMA frame buffers in PSRAM at 20 MHz.
   * **No PSRAM (DRAM Fallback):** Automatically steps down to **HQVGA (240×176)** with a single DRAM buffer at 10 MHz to prevent buffer overruns (`FB-OVF`).
 * **🔒 Safe Architecture:**
-  Internal digital pull-down on `GPIO13`, 10-second sleep-arm safety timeout, and zero recursive call-stack allocations guarantee leak-free 24/7 stability.
+  Internal digital pull-down on `GPIO13`, 10-second sleep-arm safety timeout, early Base64 heap reclamation, and zero recursive call-stack allocations guarantee leak-free 24/7 stability.
 
 ---
 
