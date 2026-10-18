@@ -34,47 +34,56 @@ An ultra-responsive, event-driven smart door camera that sleeps at near-zero pow
 ## ⚡ System Architecture
 
 ```text
-┌───────────────────────────────── EDGE DEVICE (Door Frame) ──────────────────────────────────┐
-│                                                                                              │
-│   [ HC-SR501 / AM312 PIR ]                                                                  │
-│            │ Signal HIGH (Motion Detected)                                                   │
-│            ▼                                                                                 │
-│   [ ESP32-CAM (AI-Thinker) ] ── Wake from Sleep (<10ms) ────────┐                            │
-│            │                                                    │                            │
-│            ├── Sensor Settle (150ms AWB / AGC)                  │ Dynamic Multi-Frame Loop   │
-│            ├── Captures 720p HD JPEG                            │ (Re-captures every 4s      │
-│            ├── Connects to Wi-Fi                                │  while motion persists)    │
-│            └── Encodes Base64                                   ▼                            │
-└────────────────────────────────────────────┬─────────────────────────────────────────────────┘
-                                             │ HTTPS POST (TLS 1.2 Insecure Client)
-                                             ▼
-                             ┌───────────────────────────────┐
-                             │ Google Gemini 3.8 Flash API   │
-                             │ Endpoint: /v1beta/models/...  │
-                             │ Body: Base64 JPEG + Prompt    │
-                             │ Returns: Structured JSON      │
-                             └───────────────┬───────────────┘
-                                             │ Structured Response
-                                             ▼
-                             ┌───────────────────────────────┐
-                             │ Telegram Bot API              │
-                             │ Endpoint: /sendPhoto          │
-                             │ Body: Multipart Form-Data     │
-                             │ (720p JPEG + Urgency Caption) │
-                             └───────────────┬───────────────┘
-                                             │
-                                             ▼
-                                  📱 User Phone / Alert
+┌─────────────────────── EDGE DEVICE (Door Frame) ────────────────────────┐
+│                                                                          │
+│   [ OV2640 Camera ]  ←──── Always On, Wi-Fi Connected ─────             │
+│         │                                                                │
+│         ├── Surveillance Mode: QQVGA (160×120) Grayscale @ 300ms        │
+│         │   Frame Diff: |CurrentFrame − PrevFrame| > threshold?         │
+│         │                        │                                       │
+│         │                        ▼ Motion Detected                       │
+│         ├── Upgrade to HD (1280×720) JPEG → Encode Base64               │
+│         │                                                                │
+│         └── Telegram polling: /snap, /status, /motion on|off, /help     │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │ HTTPS POST (TLS 1.2 — Insecure Client)
+                                ▼
+              ┌───────────────────────────────┐
+              │ Google Gemini 3.8 Flash API   │
+              │ Endpoint: /v1beta/models/...  │
+              │ Body: Base64 JPEG + Prompt    │
+              │ Returns: Structured JSON      │
+              │ (category / urgency / counts) │
+              └───────────────┬───────────────┘
+                              │ false_alarm → suppressed
+                              │ real event  → dispatch
+                              ▼
+              ┌───────────────────────────────┐
+              │ Telegram Bot API              │
+              │ /sendPhoto — Multipart JPEG   │
+              │ /sendMessage — Commands/Status│
+              └───────────────┬───────────────┘
+                              │
+                              ▼
+              📱 Phone — Alerts & Remote Commands
 ```
 
 ---
 
 ## ✨ Key Features
 
-* **⚡ Ultra-Rapid Wakeup:** 
-  Supports **Light Sleep mode** (`USE_LIGHT_SLEEP = true`) waking in **< 10 ms** upon PIR trigger. System RAM, camera registers, and DMA configuration are preserved without requiring a cold reboot.
-* **🔄 Active Motion Cycle:**
-  Loops dynamically while motion is active (`PIR_CAPTURE_INTERVAL_MS = 4000`), sending progressive updates. Verifies a **1.5s debounce period** before re-entering sleep to prevent false alarms or missed activity.
+* **👁️ Zero-Wiring Optical Motion Detection:**
+  Replaces the physical PIR sensor entirely. The OV2640 camera samples ultra-lightweight **QQVGA (160×120) greyscale frames every 300ms** and computes mean absolute pixel difference between successive frames. When the changed pixel fraction exceeds `MOTION_SENSITIVITY` (default 6%), an HD capture + Gemini analysis is dispatched. No jumper wires, no HC-SR501, just the ESP32-CAM board plugged into USB.
+* **🌐 Always-Connected Sentinel Mode:**
+  Runs continuously on Wi-Fi with **Automatic Modem Sleep** (`WIFI_PS_MIN_MODEM`) enabled—the radio idles down between beacon intervals, reducing idle current by ~50% while the connection stays live for instant command response.
+* **📱 Remote Telegram Command Engine:**
+  Full two-way control from anywhere in the world:
+  * **`/snap`** — Instantly capture and receive a live 720p HD photo (1–2 second response).
+  * **`/status`** — System card with uptime, Wi-Fi RSSI, IP address, free heap, and PSRAM.
+  * **`/motion off`** — Pause automatic AI alerts (e.g. while you're home gardening).
+  * **`/motion on`** — Re-enable automatic AI alerts.
+  * **`/help`** — List all commands.
+  All commands are secured with `chat_id` validation — only your Telegram account can command the device.
 * **🤖 Gemini 3.8 Flash Multimodal Reasoning:**
   Direct cloud multimodal analysis powered by `gemini-3.8-flash`. Enforces a strict OpenAPI response schema returning:
   * **Category:** Concrete classification (`delivery`, `resident_visitor`, `suspicious`, `threat`, `animal`, `false_alarm`).
@@ -96,8 +105,8 @@ An ultra-responsive, event-driven smart door camera that sleeps at near-zero pow
 * **🛡️ Adaptive Dual-Memory Pipeline:**
   * **PSRAM Detected:** Automatically provisions **HD (1280×720)** frames with double DMA frame buffers in PSRAM at 20 MHz.
   * **No PSRAM (DRAM Fallback):** Automatically steps down to **HQVGA (240×176)** with a single DRAM buffer at 10 MHz to prevent buffer overruns (`FB-OVF`).
-* **🔒 Safe Architecture:**
-  Internal digital pull-down on `GPIO13`, 10-second sleep-arm safety timeout, early Base64 heap reclamation, and zero recursive call-stack allocations guarantee leak-free 24/7 stability.
+* **🔒 Safe Always-On Architecture:**
+  Wi-Fi auto-reconnect with 30s retry intervals, early Base64 heap reclamation (~80KB freed before Telegram upload), cooldown enforcement between alerts, and a boot-time Telegram notification confirm live operation after every restart.
 
 ---
 

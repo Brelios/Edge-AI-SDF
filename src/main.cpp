@@ -2,161 +2,157 @@
  * Edge AI Smart Door Feed — Main Firmware Orchestrator
  * ESP32-CAM (AI-Thinker) + Google Gemini 3.8 Flash + Telegram Bot
  *
- * Wake cycle:
- *   PIR on GPIO13 → wake (<10ms) → capture JPEG → Gemini AI → Telegram → sleep
+ * Operation mode: Always-connected sentinel
+ *   Camera frame differencing → Optical motion trigger
+ *   → Gemini 3.8 Flash Vision AI → Rich Telegram status card
+ *   + On-demand Telegram commands: /snap, /status, /motion on|off, /help
  */
 
 #include "camera_driver.h"
 #include "config.h"
 #include "gemini_client.h"
+#include "motion_detector.h"
 #include "power_manager.h"
 #include "telegram_client.h"
 #include <Arduino.h>
 #include <WiFi.h>
 
 // ---------------------------------------------------------------------------
-// Wi-Fi Connection
+// Global State
 // ---------------------------------------------------------------------------
-bool connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
+static bool  motionEnabled  = true;   // can be toggled via /motion on|off
+static unsigned long lastAlertMs    = 0;  // timestamp of last Gemini+Telegram dispatch
+static unsigned long lastTelegramMs = 0;  // timestamp of last Telegram command poll
+static unsigned long lastMotionMs   = 0;  // timestamp of last optical motion poll
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - start > WIFI_TIMEOUT_MS) {
-      Serial.println("\nWiFi timeout!");
-      return false;
+// ---------------------------------------------------------------------------
+// dispatchAlert() — Capture HD frame, call Gemini, send Telegram card
+// ---------------------------------------------------------------------------
+static void dispatchAlert(const char* trigger) {
+    Serial.printf("\n>>> [ALERT] Triggered by: %s <<<\n", trigger);
+    Serial.printf("    Free heap: %u bytes\n", ESP.getFreeHeap());
+
+    camera_fb_t* fb      = nullptr;
+    String       base64  = captureAndEncodeJPEG(&fb);
+
+    if (base64.isEmpty() || fb == nullptr) {
+        Serial.println("[Alert] Capture failed — skipping this cycle.");
+        if (fb) esp_camera_fb_return(fb);
+        return;
     }
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected — IP: " + WiFi.localIP().toString());
-  return true;
-}
 
-// ---------------------------------------------------------------------------
-// Active Motion Cycle — loops every 4s while PIR remains HIGH
-// ---------------------------------------------------------------------------
-void processMotionCycle() {
-  Serial.println("\n>>> [MOTION DETECTED] Starting PIR Capture Cycle <<<");
+    Serial.printf("[Alert] Frame captured: %u bytes (%dx%d)\n",
+                  fb->len, fb->width, fb->height);
 
-  if (!connectWiFi()) {
-    Serial.println("WiFi connection failed — exiting motion cycle");
-    return;
-  }
+    // Call Gemini Vision API
+    String geminiRaw = callGeminiAPI(base64);
+    base64 = "";  // Immediately free ~80KB heap before Telegram upload
 
-  int frameCount = 1;
-  bool motionActive = true;
+    GeminiAnalysis analysis = parseGeminiResponse(geminiRaw);
+    Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d\n",
+                  analysis.category.c_str(), analysis.urgency.c_str(),
+                  analysis.people, analysis.packages);
 
-  while (motionActive) {
-    unsigned long cycleStart = millis();
-    Serial.printf("\n--- Capturing Motion Alert #%d ---\n", frameCount++);
-
-    // 1. Capture snapshot immediately
-    camera_fb_t *fb = nullptr;
-    String base64Image = captureAndEncodeJPEG(&fb);
-    if (!base64Image.isEmpty() && fb != nullptr) {
-      Serial.printf("Captured frame: %u bytes (%dx%d) — Free heap: %u bytes\n",
-                    fb->len, fb->width, fb->height, ESP.getFreeHeap());
-
-      // 2. Call Gemini API + parse response
-      String geminiResponse = callGeminiAPI(base64Image);
-      // Free base64 string buffer (~80KB) immediately to reclaim heap before Telegram upload
-      base64Image = "";
-
-      GeminiAnalysis analysis = parseGeminiResponse(geminiResponse);
-      Serial.println("Gemini summary: " + analysis.summary + " [" + analysis.urgency + " - " + analysis.category + "]");
-
-      // 3. Format structured caption & send Telegram photo
-      String caption = formatTelegramCaption(analysis);
-      sendTelegramPhoto(fb, caption);
-
-      // 4. Release frame buffer
-      esp_camera_fb_return(fb);
-    } else {
-      Serial.println("Capture/encode failed");
-      if (fb)
+    // Suppress false alarms if configured
+    if (SUPPRESS_FALSE_ALARMS && analysis.category == "false_alarm") {
+        Serial.println("[Alert] Suppressed — Gemini classified as false_alarm.");
         esp_camera_fb_return(fb);
+        return;
     }
 
-    // 5. Wait for the remainder of interval while monitoring PIR
-    Serial.printf("Waiting %d ms interval for next check...\n",
-                  PIR_CAPTURE_INTERVAL_MS);
-    while (millis() - cycleStart < PIR_CAPTURE_INTERVAL_MS) {
-      delay(100);
-    }
+    // Send rich Telegram status card with the captured JPEG
+    String caption = formatTelegramCaption(analysis);
+    sendTelegramPhoto(fb, caption);
+    esp_camera_fb_return(fb);
 
-    // 6. Check if PIR is still HIGH
-    if (digitalRead(PIR_GPIO) == HIGH) {
-      Serial.printf("Checking PIR sensor (GPIO%d): HIGH (Motion ongoing)\n",
-                    PIR_GPIO);
-      continue;
-    }
-
-    Serial.println("PIR went LOW — verifying motion stopped (debounce)...");
-
-    // Debounce verification to prevent false sleep during a brief pause
-    delay(SLEEP_DEBOUNCE_MS);
-    if (digitalRead(PIR_GPIO) == HIGH) {
-      Serial.println(
-          "PIR became active again during debounce — continuing motion loop");
-      continue;
-    }
-
-    motionActive = false;
-  }
-
-  Serial.println("Motion cycle finished.");
+    lastAlertMs = millis();
+    Serial.println("[Alert] Dispatch complete.");
 }
 
 // ---------------------------------------------------------------------------
-// setup() — runs on boot and every cold wake
+// setup() — Runs once on power-on or hardware reset
 // ---------------------------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
-  Serial.println("\n\n=== Edge AI Door Feed — Woke Up ===");
+    Serial.begin(115200);
+    Serial.println("\n\n=== Edge AI Door Feed — Starting Up ===");
+    Serial.printf("Chip: ESP32 rev %d  Flash: %u MB  PSRAM: %s\n",
+                  ESP.getChipRevision(),
+                  ESP.getFlashChipSize() / (1024 * 1024),
+                  psramFound() ? "Detected" : "Not found");
 
-  // Configure PIR pin and RTC internal pulldown
-  initPowerManagement();
+    // Step 1: Connect to Wi-Fi (blocks until connected or timeout)
+    if (!connectWiFi()) {
+        Serial.println("[Setup] FATAL: Cannot connect to Wi-Fi. Halting.");
+        while (true) { delay(5000); }
+    }
 
-  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  Serial.printf("Wakeup cause: %d (PIR GPIO13 = %d)\n", cause,
-                digitalRead(PIR_GPIO));
-  Serial.printf("Initial free heap: %u bytes\n", ESP.getFreeHeap());
+    // Step 2: Initialize camera (must happen before motion detector allocation)
+    if (!initCamera()) {
+        Serial.println("[Setup] FATAL: Camera init failed. Halting.");
+        while (true) { delay(5000); }
+    }
+    Serial.printf("[Setup] Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
 
-  // Init camera first (allocates contiguous DMA memory before heap fragments)
-  if (!initCamera()) {
-    Serial.println("Camera init failed — sleeping");
-    goToSleep();
-    return;
-  }
-  Serial.printf("Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
-  delay(150); // Sensor AGC/AWB settle delay
+    // Step 3: Settle AGC/AWB registers before first frame
+    delay(200);
 
-  bool isExt0Wake = (cause == ESP_SLEEP_WAKEUP_EXT0);
-  bool isColdBoot = (cause == ESP_SLEEP_WAKEUP_UNDEFINED);
-  bool isPIRHigh = (digitalRead(PIR_GPIO) == HIGH);
+    // Step 4: Initialize optical motion detector (allocates reference frame buffer)
+    initMotionDetector();
 
-  if (isExt0Wake || isPIRHigh || isColdBoot) {
-    processMotionCycle();
-  } else {
-    Serial.println("PIR is LOW on wake — entering sleep mode");
-  }
+    // Step 5: Announce readiness on Telegram
+    String bootMsg =
+        "🟢 *Edge AI Door Feed — Online*\n"
+        "─────────────────────────\n"
+        "📷 Camera: OV2640 HD (1280×720)\n"
+        "🤖 AI: gemini-3.8-flash\n"
+        "🛡 Optical motion detection: Active\n"
+        "📶 Wi-Fi: " + WiFi.localIP().toString() + " (" + String(WiFi.RSSI()) + " dBm)\n"
+        "💾 Free Heap: " + String(ESP.getFreeHeap() / 1024) + " KB\n\n"
+        "Send /help to see available commands.";
+    sendTelegramMessage(bootMsg);
+
+    Serial.println("[Setup] Boot complete — entering main loop.");
 }
 
 // ---------------------------------------------------------------------------
-// loop() — sleeps when idle, resumes on PIR motion
+// loop() — Always-connected event loop
 // ---------------------------------------------------------------------------
 void loop() {
-  goToSleep();
+    unsigned long now = millis();
 
-#if USE_LIGHT_SLEEP
-  // In Light Sleep mode, execution resumes right here after waking up
-  Serial.println("\n=== Woke from Light Sleep via PIR Motion! ===");
-  processMotionCycle();
-#endif
+    // -----------------------------------------------------------------------
+    // 1. Maintain Wi-Fi (silently reconnect if dropped)
+    // -----------------------------------------------------------------------
+    maintainWiFi();
+
+    // -----------------------------------------------------------------------
+    // 2. Poll Telegram for incoming commands at TELEGRAM_POLL_INTERVAL_MS
+    //    /snap, /status, /motion on|off, /help
+    // -----------------------------------------------------------------------
+    if (now - lastTelegramMs >= TELEGRAM_POLL_INTERVAL_MS) {
+        lastTelegramMs = now;
+        bool snapped = processTelegramCommands(motionEnabled);
+        // If /snap just fired, yield without running the motion check this cycle
+        // to avoid competing for camera hardware simultaneously.
+        if (snapped) return;
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Optical motion detection (when alerts are enabled and cooldown passed)
+    // -----------------------------------------------------------------------
+    if (motionEnabled && (now - lastMotionMs >= MOTION_POLL_INTERVAL_MS)) {
+        lastMotionMs = now;
+
+        bool motionDetected = checkOpticalMotion();
+
+        if (motionDetected) {
+            // Enforce cooldown to avoid spamming during sustained presence
+            if (now - lastAlertMs >= MOTION_COOLDOWN_MS) {
+                dispatchAlert("optical_motion");
+            } else {
+                Serial.printf("[Motion] Motion detected but cooling down (%lus remaining).\n",
+                              (unsigned long)((MOTION_COOLDOWN_MS - (now - lastAlertMs)) / 1000));
+            }
+        }
+    }
 }
