@@ -316,16 +316,36 @@ Edge-AI-SDF/
 
 ---
 
-## 🔀 Branch Architecture & Comparison
+## 🔀 Branch Architecture & Evolution
 
-The repository maintains specialized branches corresponding to key development milestones. The feature matrix below outlines active capabilities, architectural differences, and merge status:
+The repository tracks the complete evolutionary lifecycle of the Edge AI Sentinel firmware across specialized branches. Following the merge of the Sentinel engine, `main` serves as the consolidated production release:
 
-| Branch | Status | Key Features | Limitations / Legacy Behavior | Merge to `main`? |
-| :--- | :---: | :--- | :--- | :---: |
-| **`feature/optical-motion-telegram-remote`** | 🟢 **Production / Gold Standard** | • **Zero-Wiring Optical Motion Sentinel** (5 checks/sec, self-calibrating EMA baseline)<br>• **VGA (640×480)** high-clarity streaming with 56 KB buffer in DRAM (zero `FB-OVF` errors)<br>• **High-Power Flash LED** (GPIO 4) illumination on photo capture<br>• **Zero-Heap Direct Streaming** (streaming Base64 to Gemini & direct multipart to Telegram)<br>• **Interactive Telegram Remote Bot** (`/snap`, `/status`, `/motion on\|off`, `/help`)<br>• **Zero Post-Alert Blind Spot** (instant ~200ms surveillance re-arming, deferred Telegram polling)<br>• **Publication-Grade IEEE Paper** (`docs/IEEE_RESEARCH_PAPER.md`) | None. Verified on physical hardware (`COM4`), tagged as release `v1.0.0-zero-lag-vga`. | ✅ **Source of Truth** |
-| **`main`** | 🟡 **Baseline Target** | • Modular firmware structure (`camera_driver`, `gemini_client`, `telegram_client`)<br>• Structured Gemini prompt & OpenAPI schema<br>• Basic Telegram photo upload pipeline | • Lacks optical motion detection (relies on physical PIR wiring)<br>• Lacks Telegram command receiver (`/snap`, `/status`)<br>• Prone to DRAM out-of-memory crashes on non-PSRAM modules | 🎯 **Target for Merge** |
-| **`backup/main-recent`** | ⚪ **Legacy Archive** | • Snapshot of initial PIR + Light Sleep approach<br>• Basic Gemini failover and single-frame quiet periods | • Pre-modular monolithic code<br>• High wake latency from light sleep<br>• Wi-Fi RF electromagnetic pulses re-trigger physical PIR in loops | ❌ No (historical reference) |
-| **`docs/v1-working-firmware`** | ⚪ **Documentation Snapshot** | • Pre-refactor system specifications and component pinouts | • Static documentation snapshot from v1.0 milestone | ❌ No (historical reference) |
+### Branch Status & Relationship Overview
+
+| Branch | Tracking Ref | Status & Role | Key Capabilities | Merge Status |
+| :--- | :--- | :---: | :--- | :---: |
+| **`main`** | `origin/main` | 🟢 **Production Mainline** | • **Zero-Wiring Optical Sentinel Engine** (5 checks/sec, self-calibrating EMA baseline)<br>• **VGA (640×480)** high-clarity capture with 56 KB DRAM buffer (zero `FB-OVF` errors)<br>• **High-Power Flash LED** (GPIO 4) illumination on motion & `/snap`<br>• **Zero-Heap Direct Streaming** (streaming Base64 to Gemini & multipart to Telegram)<br>• **Interactive Telegram Remote Bot** (`/snap`, `/status`, `/motion on\|off`, `/help`)<br>• **Zero Post-Alert Blind Spot** (instant ~200ms surveillance re-arming, deferred Telegram polling)<br>• **Publication-Grade IEEE Research Paper** (`docs/IEEE_RESEARCH_PAPER.md`) | 🚀 **Active Production Release** |
+| **`feature/optical-motion-telegram-remote`** | `origin/feature/...` | 🟢 **Merged Feature Branch** | • Development lineage for the optical surveillance engine and Telegram bot<br>• Tagged milestone **`v1.0.0-zero-lag-vga`** on commit `afa9a7c` | ✅ **Fully merged into `main`** |
+| **`v1-working-firmware`** | `origin/v1-working-firmware` | ⚪ **Historical v1.0 Snapshot** | • Preserves initial working firmware documentation and baseline component pinout<br>• Pre-modular architecture baseline | 📦 **Archived (Historical Baseline)** |
+| **`backup/main-recent`** | `origin/backup/...` | ⚪ **Legacy Hardware PIR Archive** | • Preserves initial physical PIR + Light Sleep implementation<br>• Documents RF feedback mitigation workarounds (`MAX_ALERT_FRAMES`, 15s cooldowns) | 📦 **Archived (Historical Reference)** |
+
+---
+
+### Detailed Technical Specification Matrix
+
+| Feature / Metric | `main` & `feature/...` | `v1-working-firmware` | `backup/main-recent` |
+| :--- | :---: | :---: | :---: |
+| **Firmware Architecture** | **Clean Modular Drivers** (`camera`, `gemini`, `telegram`, `motion`, `metrics`) | Monolithic `main.cpp` + legacy HTTP web server files | Monolithic `main.cpp` + legacy HTTP web server files |
+| **Surveillance Mechanism** | **In-Place Optical Motion Engine** (5 evals/s, zero external wiring) | Hardware PIR (HC-SR501) on GPIO 13 | Hardware PIR (HC-SR501) on GPIO 13 |
+| **Operating State** | **Always-Connected Sentinel** (instant reaction, modem sleep) | Light Sleep wake loop | Light Sleep wake loop |
+| **Camera Resolution** | **VGA (640×480)** @ 10 MHz XCLK (crisp, zero overflow) | QQVGA (160×120) or unconstrained HD | HD (1280×720) (prone to `FB-OVF` in DRAM) |
+| **DRAM Buffer Allocation** | **56 KB dedicated frame buffer** (~105 KB free DRAM maintained) | Default buffer (frequent heap exhaustion on non-PSRAM) | Unbuffered (crashes without external PSRAM) |
+| **Night Illumination** | **High-Power Flash LED** (GPIO 4) auto-pulse (120ms) | None / Disabled | Status indicator blinks only |
+| **Telegram Capability** | **Full Two-Way Remote Bot** (`/snap`, `/status`, `/motion`, `/help`) | One-way alert photos only | One-way alert photos only |
+| **Gemini AI Pipeline** | **Multi-Model Dynamic Failover** + 60s 429 quota circuit breaker | Single static model string | Basic 3-attempt retry loop |
+| **Base64 Encoding** | **Zero-Heap Stream Encoding** directly over TLS socket | Large heap string allocations (causes OOM panic) | Heap allocation |
+| **Re-Arming Latency** | **~200 ms** (instant optical re-seed, deferred Telegram polling) | Several seconds (Wi-Fi reconnect + light sleep delay) | 15s forced cooldown (PIR RF feedback guard) |
+| **Documentation & Research** | **Publication-Grade IEEE Paper** + reference template included | Basic Markdown specs | Early build plan |
 
 ---
 
