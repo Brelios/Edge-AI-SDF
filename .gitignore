@@ -31,8 +31,9 @@ compile_commands.json
 *~
 
 # =============================================================================
-# OS Generated Files
+# OS & Scratch Files
 # =============================================================================
 .DS_Store
 Thumbs.db
 desktop.ini
+scratch/
