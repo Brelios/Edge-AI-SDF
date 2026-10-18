@@ -1,6 +1,6 @@
 # Edge AI Smart Door Feed — Hardware Components Specification
 
-This document provides complete, exhaustive technical specifications, pin maps, electrical requirements, and connection diagrams for all hardware components used in the **Edge AI Smart Door Feed (v1.0)**.
+This document provides complete, exhaustive technical specifications, pin maps, electrical requirements, and connection diagrams for the hardware stack used in the **Edge AI Smart Door Feed (v1.0)**: **ESP32-CAM**, **ESP32-CAM-MB Programmer Base**, and **PIR Sensor**.
 
 ---
 
@@ -11,11 +11,10 @@ This document provides complete, exhaustive technical specifications, pin maps, 
 | **Edge Compute & Vision** | AI-Thinker ESP32-CAM | 1 | 5.0 V DC (input) | 3.3 V | Dual-core Wi-Fi/BT MCU, camera controller, memory host |
 | **Image Sensor** | OmniVision OV2640 | 1 | 3.3 V (from board) | 3.3 V DVP | 2MP CMOS sensor with hardware JPEG compression engine |
 | **PIR Motion Sensor** | HC-SR501 *(or AM312)* | 1 | 4.5 V – 12 V (HC-SR501) <br> 2.7 V – 3.3 V (AM312) | 3.3 V TTL | Pyroelectric passive infrared motion detection |
-| **Flashing Base (Option A)** | ESP32-CAM-MB | 1 | 5.0 V (Micro-USB) | 3.3 V UART | Plug-and-play USB-to-UART programmer (CH340 chip) |
-| **Flashing Host (Option B)** | ESP32-WROOM-32 DevKit | 1 | 5.0 V (Micro-USB) | 3.3 V UART | Alternative programmer utilizing bridge-mode UART |
+| **Programmer & Power Base** | ESP32-CAM-MB Base Shield | 1 | 5.0 V DC (Micro-USB) | 3.3 V UART | Plug-and-play USB-to-UART programmer (CH340 chip, RST & IO0 buttons) |
 | **Power Decoupling** | 100 µF 16V Electrolytic | 1 | Up to 16 V DC | N/A | Buffers voltage rail against 800 mA Wi-Fi transmission bursts |
-| **Power Supply** | 5V 2A Wall Adapter | 1 | 100–240 V AC in | 5.0 V DC out | Stable power source for 24/7 continuous operation |
-| **Wiring** | DuPont Jumper Wires | ~8 | 300 V rated | N/A | Female-to-Female and Female-to-Male connections |
+| **Power Supply** | 5V ≥2A Micro-USB Supply | 1 | 100–240 V AC in | 5.0 V DC out | Stable power source for 24/7 continuous operation |
+| **Wiring** | DuPont Jumper Wires | 3 | 300 V rated | N/A | Female-to-Female wires connecting PIR (VCC, GND, OUT) to ESP32-CAM headers |
 
 ---
 
@@ -54,14 +53,14 @@ The AI-Thinker ESP32-CAM integrates an **ESP32-S** module with an onboard **OV26
 
 | Pin Label | GPIO Num | Primary ESP32 Function | Firmware Allocation | Notes & Constraints |
 | :--- | :---: | :--- | :--- | :--- |
-| **5V** | — | Voltage Input | 5V Power In | Connect 5V ≥2A power adapter here. |
+| **5V** | — | Voltage Input | 5V Power In | Connect 5V ≥2A power adapter here or via MB Base. |
 | **3.3V** | — | 3.3V LDO Output | Sensor Power (AM312 only) | Max output ~150 mA. Do not power HC-SR501 from this pin. |
 | **GND** | — | Ground Rail | Ground | Connect common ground with programmer & sensor. |
-| **IO1** | GPIO 1 | U0TXD | Serial Monitor / Flashing | Connects to Programmer RX pin. |
-| **IO3** | GPIO 3 | U0RXD | Flashing Input | Connects to Programmer TX pin. |
-| **IO0** | GPIO 0 | Strapping / Camera XCLK | Flash Mode / Camera Clock | **Tie to GND during flashing.** Leave floating for boot. |
-| **IO13** | GPIO 13 | SD Data 3 / HS2_DATA3 | **PIR Motion Signal Input** | RTC_GPIO14; armed as `ext0` wake source with pull-down. |
-| **IO4** | GPIO 4 | SD Data 1 | Onboard Flash LED | Active HIGH. Keep LOW to avoid blinding LED activation. |
+| **IO1** | GPIO 1 | U0TXD | Serial Monitor / Flashing | Directly routed through MB Base CH340 TX. |
+| **IO3** | GPIO 3 | U0RXD | Flashing Input | Directly routed through MB Base CH340 RX. |
+| **IO0** | GPIO 0 | Strapping / Boot | Flash Mode (GND=Flash) | Controlled automatically by MB Base or IO0 button. |
+| **IO13** | GPIO 13 | SD Data 3 | **PIR Motion Signal Input** | RTC_GPIO14; armed as `ext0` wake source with pull-down. |
+| **IO4** | GPIO 4 | SD Data 1 | Onboard Flash LED | Active HIGH. Kept OFF in firmware. |
 | **IO12** | GPIO 12 | SD Data 2 | Unused | Strapping pin. Must NOT be pulled HIGH during boot. |
 | **IO2** | GPIO 2 | SD Data 0 | Unused | Strapping pin. Must be LOW during flashing. |
 | **IO14** | GPIO 14 | SD Clock | Camera Y4 | Connected to internal camera DVP bus. |
@@ -127,76 +126,60 @@ The firmware configures internal digital image processing registers on the OV264
 * **Warm-up Time:** **30 to 60 seconds.** On initial power-up, the sensor self-calibrates to ambient room radiation and may toggle randomly. Allow 1 minute to settle.
 
 ### 4.2 AM312 Miniature PIR Breakdown (Alternative)
-* **Input Voltage:** 2.7 V – 3.3 V DC (Can connect to the ESP32-CAM 3.3V pin).
+* **Input Voltage:** 2.7 V – 3.3 V DC (Can connect to the ESP32-CAM 3.3V pin or 5V rail).
 * **Output Signal:** 3.3 V TTL active HIGH.
 * **Hold Time:** Fixed internal delay (~2–3 seconds). No potentiometers or jumpers.
 * **Form Factor:** Ultra-compact (12 mm diameter), ideal for 3D-printed miniature enclosures.
 
 ---
 
-## 5. Wiring Schematics
+## 5. Hardware Setup & Wiring (ESP32-CAM + ESP32-CAM-MB Base + PIR)
 
-### 5.1 Final Deployment Wiring (24/7 Door Operation)
+The system utilizes the dedicated **ESP32-CAM-MB programmer base**, which plugs directly onto the bottom pin headers of the ESP32-CAM. This provides a plug-and-play Micro-USB connection for both flashing and 24/7 power, with zero external wiring bridges.
 
-```
-                       5V 2A Wall Adapter
-                               ║
-                     ┌─────────╨─────────┐
-                     │  Micro-USB Cable  │
-                     └─────────┬─────────┘
-                               │
-                5V ────────────┼──────────────┐
-                               │              │
-                GND ───────────┼──────┐       │
-                               │      │       │
-                               │  [100µF Cap] │
-                               │   +     –    │
-                               │   │     │    │
-                               ▼   ▼     ▼    │
-                     ┌───────────────────┐    │
-                     │  ESP32-CAM Board  │    │
-                     │                   │    │
-                     │ 5V   [Power In]   │◄───┘
-                     │ GND  [Ground]     │◄─── Ground
-                     │                   │
-                     │ IO13 [PIR Signal] │◄─── OUT
-                     └───────────────────┘      │
-                                                │
-                     ┌───────────────────┐      │
-                     │  HC-SR501 Sensor  │      │
-                     │                   │      │
-                     │ VCC  (5V Input)   │◄─────┘ (From 5V rail)
-                     │ OUT  (3.3V Signal)│─────── To IO13
-                     │ GND  (Ground)     │◄────── To GND rail
-                     └───────────────────┘
+```text
+       ┌────────────────────────────────────────────────────────┐
+       │                  HC-SR501 PIR Sensor                   │
+       │                                                        │
+       │     [ VCC ]              [ OUT ]             [ GND ]   │
+       └────────┬────────────────────┬───────────────────┬──────┘
+                │ 5V                 │ IO13              │ GND
+                │ (Power)            │ (Motion Signal)   │ (Ground)
+                ▼                    ▼                   ▼
+       ┌────────────────────────────────────────────────────────┐
+       │                 ESP32-CAM (AI-Thinker)                 │
+       │                                                        │
+       │   [ 5V ]                     [ IO13 ]       [ GND ]    │
+       │                                                        │
+       │            [ OV2640 Lens ]        [ Flash LED ]        │
+       ├────────────────────────────────────────────────────────┤
+       │                ESP32-CAM-MB Base Shield                │
+       │                                                        │
+       │      [ RST Button ]                  [ IO0 Button ]    │
+       │                                                        │
+       │                  [ Micro-USB Port ]                    │
+       └───────────────────────────┬────────────────────────────┘
+                                   ║
+                         Micro-USB Data Cable
+                                   ║
+                     PC (Flash) / 5V 2A Adapter (Run)
 ```
 
-> [!IMPORTANT]
-> **Power Supply Stability:** Wi-Fi radio transmissions cause rapid current spikes up to 800 mA for fractions of a second. The **100 µF capacitor** installed across 5V and GND directly at the ESP32-CAM board pins prevents voltage sag brownouts (`rst:0x10 (RTCWDT_RTC_RESET)`).
+### 5.1 PIR Sensor Connections (Only 3 Wires)
 
----
+| PIR Sensor Pin | ESP32-CAM Header Pin | Wire Color (Typical) | Purpose |
+| :--- | :--- | :---: | :--- |
+| **VCC** | **5V** | Red | 5V DC power rail to sensor regulator |
+| **GND** | **GND** | Black | System ground return |
+| **OUT** | **IO13** | Yellow / Blue | 3.3V logic motion trigger to RTC GPIO 13 |
 
-### 5.2 Flashing Wiring (Phase A — One-Time Setup via DevKit)
+### 5.2 ESP32-CAM-MB Base Functionality
 
-When using an ESP32 DevKit as a USB-to-UART bridge:
-
-```
-  ESP32-WROOM-32 DevKit                    ESP32-CAM (AI-Thinker)
-  ┌───────────────────┐                    ┌───────────────────┐
-  │                   │                    │                   │
-  │   5V / VIN ───────┼───────────────────►│ 5V                │
-  │   GND ────────────┼───────────────────►│ GND               │
-  │   TX0 (GPIO 1) ───┼───────────────────►│ IO1 (U0TXD)       │
-  │   RX0 (GPIO 3) ───┼───────────────────►│ IO3 (U0RXD)       │
-  │                   │                    │                   │
-  │   EN ────┐        │                    │ IO0 ────┐         │
-  │          │        │                    │         │         │
-  │   GND ───┘ (strap)│                    │ GND ────┘ (flash) │
-  └───────────────────┘                    └───────────────────┘
-```
-
-* DevKit **EN** is tied to DevKit **GND** to keep the DevKit's onboard ESP32 in reset, allowing the USB-UART converter (CP2102/CH340) to communicate directly with the ESP32-CAM.
-* ESP32-CAM **IO0** is tied to **GND** to enter ROM serial bootloader download mode.
+* **Onboard USB-to-UART:** CH340/CH340C bridge providing high-speed serial flashing and live 115200 baud debugging over a single Micro-USB cable.
+* **Auto-Flash Circuitry:** Automatically asserts DTR/RTS to pull `IO0` LOW and resets the ESP32 into ROM download mode when `pio run --target upload` runs in PlatformIO.
+* **Buttons:**
+  * **RST:** Pulls `EN` to GND, performing a hardware restart.
+  * **IO0:** Pulls `GPIO0` to GND, manually invoking bootloader mode if auto-download is not supported by a clone board.
 
 ---
 

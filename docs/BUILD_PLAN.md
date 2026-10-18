@@ -1,6 +1,6 @@
 # Edge AI Smart Door Feed — Comprehensive Engineering Build Plan
 
-> **Hardware:** AI-Thinker ESP32-CAM (OV2640) · **Programmer:** ESP32-CAM-MB Base *or* ESP32 DevKit · **Vision AI:** Google Gemini 3.8 Flash · **Alerts:** Telegram Bot API · **Firmware Release:** v1.0 (Production)
+> **Hardware:** AI-Thinker ESP32-CAM (OV2640) · **Programmer:** ESP32-CAM-MB Base Shield · **Vision AI:** Google Gemini 3.8 Flash · **Alerts:** Telegram Bot API · **Firmware Release:** v1.0 (Production)
 
 ---
 
@@ -9,9 +9,7 @@
 1. [System Architecture](#1-system-architecture)
 2. [Bill of Materials (BOM)](#2-bill-of-materials-bom)
 3. [Pinouts & Hardware Allocation](#3-pinouts--hardware-allocation)
-4. [Wiring Diagrams](#4-wiring-diagrams)
-   - [Phase A: Flashing via DevKit Bridge](#phase-a-flashing-wiring-one-time-setup)
-   - [Phase B: Final 24/7 Deployment](#phase-b-final-deployment-wiring)
+4. [Hardware Setup & Wiring](#4-hardware-setup--wiring)
 5. [Toolchain & Environment Setup](#5-toolchain--environment-setup)
 6. [Firmware Architecture](#6-firmware-architecture)
    - [Sleep & Wake Lifecycle](#61-sleep--wake-lifecycle)
@@ -87,8 +85,8 @@ t = 4000 ms  PIR re-checked:
 | **3** | **PIR Motion Sensor** | 1 | **HC-SR501** (powered from 5V rail; 3.3V TTL out) or **AM312** (3.3V). |
 | **4** | **Power Supply** | 1 | 5V DC ≥ 2.0A Wall Adapter with high-gauge Micro-USB cable. |
 | **5** | **Decoupling Capacitor** | 1 | **100 µF 16V electrolytic capacitor** across 5V and GND at the board. |
-| **6** | **Programmer** | 1 | **ESP32-CAM-MB Base** *(plug-and-play)* or **ESP32 DevKit** *(jumper bridge)*. |
-| **7** | **DuPont Wires** | ~8 | Female-to-Female & Female-to-Male jumpers. |
+| **6** | **Programmer & Power Base** | 1 | **ESP32-CAM-MB Base Shield** (Micro-USB with CH340, RST & IO0 buttons). |
+| **7** | **DuPont Wires** | 3 | Female-to-Female jumpers for PIR sensor connection. |
 
 > 📖 **Full Hardware Specifications:** Consult [docs/COMPONENTS.md](../docs/COMPONENTS.md) for electrical ratings, pinout diagrams, and operating parameters.
 
@@ -128,64 +126,55 @@ t = 4000 ms  PIR re-checked:
 
 ---
 
-## 4. Wiring Diagrams
+## 4. Hardware Setup & Wiring
 
-### Phase A: Flashing Wiring (One-Time Setup via DevKit)
-
-```text
- ESP32-WROOM-32 DevKit                      ESP32-CAM (AI-Thinker)
- ┌──────────────────────┐                   ┌──────────────────────┐
- │                      │                   │                      │
- │   5V / VIN ──────────┼──────────────────►│ 5V                   │
- │   GND ───────────────┼──────────────────►│ GND                  │
- │   TX0 (GPIO 1) ──────┼──────────────────►│ IO1 (U0TXD)          │
- │   RX0 (GPIO 3) ──────┼──────────────────►│ IO3 (U0RXD)          │
- │                      │                   │                      │
- │   EN ────┐           │                   │ IO0 ────┐            │
- │          │ (strap)   │                   │         │ (flash)    │
- │   GND ───┘           │                   │ GND ────┘            │
- └──────────────────────┘                   └──────────────────────┘
-```
-
-1. DevKit **EN** connects to DevKit **GND** (holds the DevKit microcontroller in reset).
-2. ESP32-CAM **IO0** connects to ESP32-CAM **GND** (enters ROM bootloader mode).
-3. Connect DevKit via USB to PC, build, and flash firmware.
-4. Remove **IO0 → GND** jumper and press ESP32-CAM **RST** button to start normal execution.
-
----
-
-### Phase B: Final Deployment Wiring (24/7 Door Mounting)
+The ESP32-CAM plugs directly onto the **ESP32-CAM-MB Base Shield**, providing a single Micro-USB port for programming and 24/7 power.
 
 ```text
- 5V 2A Wall Supply
-        ║
- ┌──────╨──────┐
- │  Micro-USB  │
- └──────┬──────┘
-        │
-  5V ───┼────────────────────────────────────────┐
-        │                                        │
- GND ───┼───────────────┐                        │
-        │               │                        │
-        │      ┌───[ 100µF Cap ]───┐             │
-        │      │   +           –   │             │
-        ▼      ▼   │           │   ▼             │
- ┌─────────────────┴───────────┴───────────┐     │
- │            ESP32-CAM (AI-Thinker)       │     │
- │                                         │     │
- │ 5V   [5V Power Input]                   │◄────┘
- │ GND  [System Ground]                    │◄──── Common Ground
- │ IO13 [PIR Motion Signal with Pull-Down] │◄──── OUT (3.3V Logic)
- └─────────────────────────────────────────┘      │
-                                                  │
- ┌─────────────────────────────────────────┐      │
- │          HC-SR501 PIR Sensor            │      │
- │                                         │      │
- │ VCC  (5V Input)                         │◄─────┘ (From 5V Rail)
- │ OUT  (3.3V Signal Output)               │─────── To IO13
- │ GND  (Common Ground)                    │◄────── To GND Rail
- └─────────────────────────────────────────┘
+       ┌────────────────────────────────────────────────────────┐
+       │                  HC-SR501 PIR Sensor                   │
+       │                                                        │
+       │     [ VCC ]              [ OUT ]             [ GND ]   │
+       └────────┬────────────────────┬───────────────────┬──────┘
+                │ 5V                 │ IO13              │ GND
+                │ (Power)            │ (Motion Signal)   │ (Ground)
+                ▼                    ▼                   ▼
+       ┌────────────────────────────────────────────────────────┐
+       │                 ESP32-CAM (AI-Thinker)                 │
+       │                                                        │
+       │   [ 5V ]                     [ IO13 ]       [ GND ]    │
+       │                                                        │
+       │            [ OV2640 Lens ]        [ Flash LED ]        │
+       ├────────────────────────────────────────────────────────┤
+       │                ESP32-CAM-MB Base Shield                │
+       │                                                        │
+       │      [ RST Button ]                  [ IO0 Button ]    │
+       │                                                        │
+       │                  [ Micro-USB Port ]                    │
+       └───────────────────────────┬────────────────────────────┘
+                                   ║
+                         Micro-USB Data Cable
+                                   ║
+                     PC (Flash) / 5V 2A Adapter (Run)
 ```
+
+### 4.1 PIR Motion Sensor Wiring (Only 3 Wires)
+
+| PIR Pin | ESP32-CAM Pin | Purpose |
+| :--- | :--- | :--- |
+| **VCC** | **5V** | 5V DC power rail to sensor regulator |
+| **GND** | **GND** | Circuit ground return |
+| **OUT** | **IO13** | 3.3V logic motion trigger to RTC GPIO 13 |
+
+### 4.2 Flashing & Runtime Workflow
+
+1. **Flashing Firmware:**
+   * Seat the ESP32-CAM firmly onto the MB base.
+   * Connect the Micro-USB cable to your PC.
+   * Execute: `pio run --target upload`. The MB base's automatic DTR/RTS circuitry puts the ESP32 into bootloader mode without manual jumpers.
+2. **Runtime Deployment:**
+   * Press the **RST** button on the MB base (or plug into any 5V ≥ 2A USB wall charger).
+   * The firmware executes immediately and enters **Light Sleep** awaiting PIR triggers.
 
 ---
 
@@ -293,10 +282,10 @@ Credentials are stored securely in `include/secrets.h` (excluded from git):
 
 ## 8. Flash & Verification Procedure
 
-1. **Verify Connections:** Wire programmer to ESP32-CAM with `IO0` connected to `GND`.
+1. **Connect Hardware:** Seat the ESP32-CAM onto the ESP32-CAM-MB base and plug the Micro-USB cable into your PC.
 2. **Compile:** In PlatformIO, run `pio run` to verify zero compile or link errors.
-3. **Upload:** Run `pio run --target upload`. Watch terminal for `Writing at 0x00010000... (100%)`.
-4. **Boot:** Disconnect `IO0 → GND` wire and press the board's **RST** button.
+3. **Upload:** Run `pio run --target upload`. The MB base automatically controls `IO0` and `RST` to flash the chip.
+4. **Boot:** Press the **RST** button on the MB base (or power cycle).
 5. **Serial Inspection (115200 baud):**
    ```text
    === Edge AI Door Feed — Woke Up ===

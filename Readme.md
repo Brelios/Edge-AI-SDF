@@ -106,8 +106,8 @@ An ultra-responsive, event-driven smart door camera that sleeps at near-zero pow
 | **3** | **PIR Motion Sensor** | HC-SR501 *(or AM312 miniature)* | Passive infrared human motion detection |
 | **4** | **Power Supply** | 5V DC ≥ 2.0A Wall Adapter + Micro-USB | Powers board and sensor during 24/7 deployment |
 | **5** | **Decoupling Capacitor** | 100 µF 16V Electrolytic Capacitor | Placed across 5V and GND to suppress Wi-Fi brownouts |
-| **6** | **Programmer** | ESP32-CAM-MB Base *or* ESP32 DevKit | Flashes firmware over UART into ESP32-CAM |
-| **7** | **Jumper Wires** | Female-to-Female DuPont Cables | Interconnecting PIR, capacitor, and programmer |
+| **6** | **Programmer & Power Base** | ESP32-CAM-MB Base Shield | Dedicated USB-to-UART base with Micro-USB port and RST/IO0 buttons |
+| **7** | **Jumper Wires** | 3x Female-to-Female DuPont Cables | Connects PIR sensor (5V, GND, IO13) to ESP32-CAM headers |
 
 > 📖 **Full Hardware Deep-Dive:** See [docs/COMPONENTS.md](docs/COMPONENTS.md) for pin specifications, voltage tolerance charts, and component datasheets.
 
@@ -142,64 +142,55 @@ If utilizing an **HC-SR501** module, set the onboard controls as follows for opt
 
 ---
 
-## 🔌 Wiring & Flashing Schematics
+## 🔌 Hardware Setup & Wiring (ESP32-CAM + MB Base + PIR)
 
-### 1. Deployment Wiring (24/7 Door-Mounted Operation)
-
-```text
- 5V 2A Wall Supply
-        ║
- ┌──────╨──────┐
- │  Micro-USB  │
- └──────┬──────┘
-        │
-  5V ───┼────────────────────────────────────────┐
-        │                                        │
- GND ───┼───────────────┐                        │
-        │               │                        │
-        │      ┌───[ 100µF Cap ]───┐             │
-        │      │   +           –   │             │
-        ▼      ▼   │           │   ▼             │
- ┌─────────────────┴───────────┴───────────┐     │
- │            ESP32-CAM (AI-Thinker)       │     │
- │                                         │     │
- │ 5V   [5V Power Input]                   │◄────┘
- │ GND  [System Ground]                    │◄──── Common Ground
- │ IO13 [PIR Motion Signal with Pull-Down] │◄──── OUT (3.3V Logic)
- └─────────────────────────────────────────┘      │
-                                                  │
- ┌─────────────────────────────────────────┐      │
- │          HC-SR501 PIR Sensor            │      │
- │                                         │      │
- │ VCC  (5V Input)                         │◄─────┘ (From 5V Rail)
- │ OUT  (3.3V Signal Output)               │─────── To IO13
- │ GND  (Common Ground)                    │◄────── To GND Rail
- └─────────────────────────────────────────┘
-```
-
----
-
-### 2. Flashing Wiring (via ESP32-WROOM-32 DevKit as Programmer)
-
-If you do not have an ESP32-CAM-MB micro-USB base, you can use any standard ESP32 DevKit as a USB-to-UART bridge:
+The system is designed around the **ESP32-CAM-MB Programmer Base**, which connects directly to the bottom female headers of the ESP32-CAM. This eliminates the need for separate FTDI bridges, voltage dividers, or manual jumper switches.
 
 ```text
- ESP32-WROOM-32 DevKit                      ESP32-CAM (AI-Thinker)
- ┌──────────────────────┐                   ┌──────────────────────┐
- │                      │                   │                      │
- │   5V / VIN ──────────┼──────────────────►│ 5V                   │
- │   GND ───────────────┼──────────────────►│ GND                  │
- │   TX0 (GPIO 1) ──────┼──────────────────►│ IO1 (U0TXD)          │
- │   RX0 (GPIO 3) ──────┼──────────────────►│ IO3 (U0RXD)          │
- │                      │                   │                      │
- │   EN ────┐           │                   │ IO0 ────┐            │
- │          │ (strap)   │                   │         │ (flash)    │
- │   GND ───┘           │                   │ GND ────┘            │
- └──────────────────────┘                   └──────────────────────┘
+       ┌────────────────────────────────────────────────────────┐
+       │                  HC-SR501 PIR Sensor                   │
+       │                                                        │
+       │     [ VCC ]              [ OUT ]             [ GND ]   │
+       └────────┬────────────────────┬───────────────────┬──────┘
+                │ 5V                 │ IO13              │ GND
+                │ (Power)            │ (Motion Signal)   │ (Ground)
+                ▼                    ▼                   ▼
+       ┌────────────────────────────────────────────────────────┐
+       │                 ESP32-CAM (AI-Thinker)                 │
+       │                                                        │
+       │   [ 5V ]                     [ IO13 ]       [ GND ]    │
+       │                                                        │
+       │            [ OV2640 Lens ]        [ Flash LED ]        │
+       ├────────────────────────────────────────────────────────┤
+       │                ESP32-CAM-MB Base Shield                │
+       │                                                        │
+       │      [ RST Button ]                  [ IO0 Button ]    │
+       │                                                        │
+       │                  [ Micro-USB Port ]                    │
+       └───────────────────────────┬────────────────────────────┘
+                                   ║
+                         Micro-USB Data Cable
+                                   ║
+                     PC (Flash) / 5V 2A Adapter (Run)
 ```
 
-* **DevKit EN → GND:** Holds the DevKit's onboard chip in reset so its CP2102/CH340 chip acts purely as a USB-to-UART bridge.
-* **ESP32-CAM IO0 → GND:** Places the ESP32-CAM into serial bootloader download mode. Remove this jumper wire after flashing and press RESET.
+### 1. PIR Motion Sensor Wiring (Only 3 Wires)
+
+| PIR Sensor Pin | ESP32-CAM Header Pin | Purpose |
+| :--- | :--- | :--- |
+| **VCC** | **5V** | 5V DC power rail to sensor regulator |
+| **GND** | **GND** | System ground return |
+| **OUT** | **IO13** | 3.3V logic motion trigger to RTC GPIO 13 |
+
+### 2. Flashing & Running with ESP32-CAM-MB
+
+1. **Flashing Firmware:**
+   * Firmly seat the ESP32-CAM onto the MB base.
+   * Connect a standard Micro-USB data cable from the MB base to your PC.
+   * Run `pio run --target upload`. The onboard CH340 circuit automatically pulls `IO0` LOW and resets the ESP32 into bootloader mode.
+2. **Normal Run Mode:**
+   * Press the **RST** button on the MB base once flashing completes (or plug into any 5V ≥ 2A USB wall charger).
+   * The camera boots, captures a test frame, verifies cloud APIs, and enters **Light Sleep** awaiting PIR motion.
 
 ---
 
@@ -291,8 +282,7 @@ You can fine-tune operating parameters at the top of [src/main.cpp](src/main.cpp
 Edge-AI-SDF/
 ├── docs/
 │   ├── BUILD_PLAN.md               # Detailed engineering and deployment build plan
-│   ├── COMPONENTS.md               # Hardware specifications and component pinouts
-│   └── ESP32-CAM_Programming_...   # Guide for using NodeMCU / DevKit programmers
+│   └── COMPONENTS.md               # Hardware specifications and component pinouts
 ├── include/
 │   ├── secrets_example.h           # Template credentials file (safe to commit)
 │   └── secrets.h                   # Active credentials file (git-ignored)
