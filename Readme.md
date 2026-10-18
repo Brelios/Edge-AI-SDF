@@ -28,6 +28,7 @@ An ultra-responsive, event-driven smart door camera that sleeps at near-zero pow
 - [Firmware Configuration Options](#-firmware-configuration-options)
 - [Troubleshooting Reference](#-troubleshooting-reference)
 - [Repository Structure](#-repository-structure)
+- [Branch Architecture & Comparison](#-branch-architecture--comparison)
 
 ---
 
@@ -312,6 +313,19 @@ Edge-AI-SDF/
 ├── .gitignore                      # Git exclusion rules (protects secrets.h and binaries)
 └── Readme.md                       # Project documentation
 ```
+
+---
+
+## 🔀 Branch Architecture & Comparison
+
+The repository maintains specialized branches corresponding to key development milestones. The feature matrix below outlines active capabilities, architectural differences, and merge status:
+
+| Branch | Status | Key Features | Limitations / Legacy Behavior | Merge to `main`? |
+| :--- | :---: | :--- | :--- | :---: |
+| **`feature/optical-motion-telegram-remote`** | 🟢 **Production / Gold Standard** | • **Zero-Wiring Optical Motion Sentinel** (5 checks/sec, self-calibrating EMA baseline)<br>• **VGA (640×480)** high-clarity streaming with 56 KB buffer in DRAM (zero `FB-OVF` errors)<br>• **High-Power Flash LED** (GPIO 4) illumination on photo capture<br>• **Zero-Heap Direct Streaming** (streaming Base64 to Gemini & direct multipart to Telegram)<br>• **Interactive Telegram Remote Bot** (`/snap`, `/status`, `/motion on\|off`, `/help`)<br>• **Zero Post-Alert Blind Spot** (instant ~200ms surveillance re-arming, deferred Telegram polling)<br>• **Publication-Grade IEEE Paper** (`docs/IEEE_RESEARCH_PAPER.md`) | None. Verified on physical hardware (`COM4`), tagged as release `v1.0.0-zero-lag-vga`. | ✅ **Source of Truth** |
+| **`main`** | 🟡 **Baseline Target** | • Modular firmware structure (`camera_driver`, `gemini_client`, `telegram_client`)<br>• Structured Gemini prompt & OpenAPI schema<br>• Basic Telegram photo upload pipeline | • Lacks optical motion detection (relies on physical PIR wiring)<br>• Lacks Telegram command receiver (`/snap`, `/status`)<br>• Prone to DRAM out-of-memory crashes on non-PSRAM modules | 🎯 **Target for Merge** |
+| **`backup/main-recent`** | ⚪ **Legacy Archive** | • Snapshot of initial PIR + Light Sleep approach<br>• Basic Gemini failover and single-frame quiet periods | • Pre-modular monolithic code<br>• High wake latency from light sleep<br>• Wi-Fi RF electromagnetic pulses re-trigger physical PIR in loops | ❌ No (historical reference) |
+| **`docs/v1-working-firmware`** | ⚪ **Documentation Snapshot** | • Pre-refactor system specifications and component pinouts | • Static documentation snapshot from v1.0 milestone | ❌ No (historical reference) |
 
 ---
 
