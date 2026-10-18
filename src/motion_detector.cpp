@@ -126,30 +126,21 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
 
     bool exceedsThreshold = (delta >= MOTION_SENSITIVITY);
 
-    if (exceedsThreshold) {
-        // If scene is static (no consecutive change) for > 10 checks (~2s),
-        // it means room ambient lighting permanently changed (e.g. lamp turned on).
-        // Adapt baseline to the new ambient lighting instead of triggering false alarms!
-        if (consecutiveDelta < 0.025f) {
-            staticDriftCount++;
-            if (staticDriftCount > 8) {
-                baselineLen = (0.80f * baselineLen) + (0.20f * (float)curLen);
-                esp_camera_fb_return(fb);
-                g_metrics.lastMotionCheckMs = millis() - checkStart;
-                return false;
-            }
-        } else {
-            staticDriftCount = 0;
-        }
+    static uint8_t debugTick = 0;
+    if (++debugTick >= 5) {
+        debugTick = 0;
+        Serial.printf("[Motion Stats] cur=%u base=%.0f delta=%.1f%% (threshold=%.1f%%)\n",
+                      curLen, baselineLen, delta * 100.0f, MOTION_SENSITIVITY * 100.0f);
+    }
 
-        // Active dynamic motion!
+    if (exceedsThreshold) {
         g_metrics.motionTriggersCount++;
         g_metrics.lastTriggerSource = "Optical";
         g_metrics.lastTriggerDelta = delta * 100.0f;
         g_metrics.lastMotionCheckMs = millis() - checkStart;
 
-        Serial.printf("[Motion] TRIGGERED! Delta: %.1f%% (cur=%u, base=%.0f, step=%.1f%%, eval=%ums)\n",
-                      delta * 100.0f, curLen, baselineLen, consecutiveDelta * 100.0f, g_metrics.lastMotionCheckMs);
+        Serial.printf("[Motion] TRIGGERED! Delta: %.1f%% >= %.1f%% (cur=%u, base=%.0f, eval=%ums)\n",
+                      delta * 100.0f, MOTION_SENSITIVITY * 100.0f, curLen, baselineLen, g_metrics.lastMotionCheckMs);
 
         // Forward this exact triggering frame
         if (fb_out) {
@@ -160,9 +151,8 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
         return true;
     }
 
-    // No motion detected: reset drift count and update baseline with smooth EMA
-    staticDriftCount = 0;
-    baselineLen = (0.95f * baselineLen) + (0.05f * (float)curLen);
+    // No motion: slow EMA (0.98 / 0.02) tracks gradual daylight changes without absorbing moving subjects
+    baselineLen = (0.98f * baselineLen) + (0.02f * (float)curLen);
 
     esp_camera_fb_return(fb);
     g_metrics.lastMotionCheckMs = millis() - checkStart;

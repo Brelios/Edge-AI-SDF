@@ -88,8 +88,9 @@ void setup() {
 
     // Step 2: Initialize camera
     if (!initCamera()) {
-        Serial.println("[Setup] FATAL: Camera init failed. Halting.");
-        while (true) { delay(5000); }
+        Serial.println("[Setup] FATAL: Camera init failed. Rebooting in 3s...");
+        delay(3000);
+        ESP.restart();
     }
     Serial.printf("[Setup] Camera OK — Free heap: %u bytes\n", ESP.getFreeHeap());
 

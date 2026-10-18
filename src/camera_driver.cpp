@@ -7,15 +7,6 @@ framesize_t getTargetFrameSize() {
 }
 
 bool initCamera() {
-    // Hardware reset sensor via PWDN if available to clear hung I2C/SCCB state
-    #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM != -1)
-    pinMode(PWDN_GPIO_NUM, OUTPUT);
-    digitalWrite(PWDN_GPIO_NUM, HIGH); // Power off sensor
-    delay(50);
-    digitalWrite(PWDN_GPIO_NUM, LOW);  // Power on sensor
-    delay(50);
-    #endif
-
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer   = LEDC_TIMER_0;
@@ -57,9 +48,28 @@ bool initCamera() {
         config.jpeg_buffer_size = 49152;           // 48 KB buffer (fits VGA frames reliably)
     }
 
-    esp_err_t err = esp_camera_init(&config);
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        // Hardware power cycle sensor via PWDN to clear any hung I2C/SCCB bus state
+        #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM != -1)
+        pinMode(PWDN_GPIO_NUM, OUTPUT);
+        digitalWrite(PWDN_GPIO_NUM, HIGH); // Power OFF
+        delay(150);
+        digitalWrite(PWDN_GPIO_NUM, LOW);  // Power ON
+        delay(150);
+        #endif
+
+        err = esp_camera_init(&config);
+        if (err == ESP_OK) {
+            if (attempt > 1) Serial.printf("[Camera] Initialized successfully on attempt %d\n", attempt);
+            break;
+        }
+        Serial.printf("[Camera] Attempt %d failed (0x%x) — power-cycling sensor...\n", attempt, err);
+        delay(200);
+    }
+
     if (err != ESP_OK) {
-        Serial.printf("[Camera] esp_camera_init failed: 0x%x\n", err);
+        Serial.printf("[Camera] esp_camera_init failed after retries: 0x%x\n", err);
         return false;
     }
 
