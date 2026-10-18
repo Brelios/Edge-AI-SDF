@@ -1,6 +1,7 @@
 #include "telegram_client.h"
 #include "camera_driver.h"
 #include "config.h"
+#include "system_metrics.h"
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -8,6 +9,8 @@
 
 bool sendTelegramPhoto(camera_fb_t* fb, const String& caption) {
     if (!fb || !fb->buf || fb->len == 0) return false;
+
+    unsigned long upStart = millis();
 
     WiFiClientSecure client;
     client.setInsecure();
@@ -75,7 +78,8 @@ bool sendTelegramPhoto(camera_fb_t* fb, const String& caption) {
     client.stop();
 
     if (httpCode == 200) {
-        Serial.println("[Telegram] Photo sent successfully!");
+        g_metrics.lastUploadLatencyMs = millis() - upStart;
+        Serial.printf("[Telegram] Photo sent successfully! (upload: %ums)\n", g_metrics.lastUploadLatencyMs);
         return true;
     } else {
         Serial.printf("[Telegram] sendPhoto error, HTTP code: %d\n", httpCode);
@@ -182,11 +186,17 @@ bool processTelegramCommands(bool& motionEnabled) {
         // /snap — Instantly capture and send a live photo (zero Gemini, zero base64)
         // ---------------------------------------------------------------
         if (cmd == "/snap") {
+            unsigned long snapStart = millis();
             camera_fb_t* fb = captureJPEG();
             if (fb) {
+                unsigned long capMs = millis() - snapStart;
                 String caption = "📸 *Live Snap*  •  " + String(fb->width) + "×" + String(fb->height) +
-                                 "  |  📶 " + String(WiFi.RSSI()) + " dBm";
+                                 "  |  ⏱️ " + String(capMs) + "ms cap  |  📶 " + String(WiFi.RSSI()) + " dBm";
                 sendTelegramPhoto(fb, caption);
+                g_metrics.lastSnapLatencyMs = millis() - snapStart;
+                g_metrics.snapsServicedCount++;
+                Serial.printf("[Snap] Serviced in %ums (Capture: %ums, Upload: %ums)\n",
+                              g_metrics.lastSnapLatencyMs, capMs, g_metrics.lastUploadLatencyMs);
                 esp_camera_fb_return(fb);
                 snapped = true;
             } else {
@@ -195,25 +205,37 @@ bool processTelegramCommands(bool& motionEnabled) {
         }
 
         // ---------------------------------------------------------------
-        // /status — System diagnostic card
+        // /status — Rich diagnostic card with live latencies & stats
         // ---------------------------------------------------------------
         else if (cmd == "/status") {
             uint32_t upSec  = millis() / 1000;
             uint32_t upHr   = upSec / 3600;
             uint32_t upMin  = (upSec % 3600) / 60;
+            uint32_t upS    = upSec % 60;
 
             String resStr = psramFound() ? "OV2640 HD (1280×720)" : "OV2640 QVGA (320×240)";
             String msg =
                 "🖥 *Edge AI Door Feed — System Status*\n"
                 "─────────────────────────\n"
-                "⏱ *Uptime:* " + String(upHr) + "h " + String(upMin) + "m\n"
-                "📶 *Wi-Fi Signal:* " + String(WiFi.RSSI()) + " dBm\n"
-                "🌐 *Local IP:* " + WiFi.localIP().toString() + "\n"
-                "🛡 *Motion Alerts:* " + String(motionEnabled ? "✅ Active" : "⏸ Paused") + "\n"
-                "🧠 *Free Heap:* " + String(ESP.getFreeHeap() / 1024) + " KB\n"
-                "💾 *PSRAM:* " + (psramFound() ? String(ESP.getFreePsram() / 1024) + " KB" : "Disabled (DRAM mode)") + "\n"
+                "⏱ *Uptime:* " + String(upHr) + "h " + String(upMin) + "m " + String(upS) + "s\n"
+                "📶 *Wi-Fi:* " + WiFi.localIP().toString() + " (" + String(WiFi.RSSI()) + " dBm)\n"
+                "🧠 *Free Heap:* " + String(ESP.getFreeHeap() / 1024) + " KB (Max Block: " + String(ESP.getMaxAllocHeap() / 1024) + " KB)\n"
                 "📷 *Camera:* " + resStr + "\n"
-                "🤖 *AI Model:* " + String(GEMINI_MODEL);
+                "🤖 *AI Model:* " + String(g_metrics.activeModel) + "\n"
+                "🛡 *Motion Alerts:* " + String(motionEnabled ? "✅ Active" : "⏸ Paused") + "\n"
+                "─────────────────────────\n"
+                "⚡ *Latency & Timing*\n"
+                "• 🧠 *Gemini AI:* " + (g_metrics.lastAiLatencyMs > 0 ? String(g_metrics.lastAiLatencyMs) + " ms" : "Pending") + "\n"
+                "• 📤 *Telegram Upload:* " + (g_metrics.lastUploadLatencyMs > 0 ? String(g_metrics.lastUploadLatencyMs) + " ms" : "Pending") + "\n"
+                "• 📸 *Last /snap Total:* " + (g_metrics.lastSnapLatencyMs > 0 ? String(g_metrics.lastSnapLatencyMs) + " ms" : "None yet") + "\n"
+                "• 👁️ *Optical Frame Eval:* " + String(g_metrics.lastMotionCheckMs) + " ms\n"
+                "─────────────────────────\n"
+                "📊 *Activity Counters*\n"
+                "• 🎯 *Motion Triggers:* " + String(g_metrics.motionTriggersCount) + " (Last: " + String(g_metrics.lastTriggerSource) + (g_metrics.lastTriggerDelta > 0.0f ? " Δ " + String(g_metrics.lastTriggerDelta, 1) + "%" : "") + ")\n"
+                "• 🔔 *Alerts Dispatched:* " + String(g_metrics.alertsDispatchedCount) + "\n"
+                "• 🍃 *False Alarms Filtered:* " + String(g_metrics.falseAlarmsSuppressed) + "\n"
+                "• 📸 *Snaps Serviced:* " + String(g_metrics.snapsServicedCount);
+
             sendTelegramMessage(msg);
         }
 

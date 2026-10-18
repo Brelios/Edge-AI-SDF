@@ -1,6 +1,7 @@
 #include "gemini_client.h"
 #include "config.h"
 #include "camera_driver.h"
+#include "system_metrics.h"
 #include "mbedtls/base64.h"
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
@@ -70,6 +71,8 @@ String callGeminiAPI(camera_fb_t* fb) {
         WiFiClientSecure client;
         client.setInsecure();
         client.setTimeout(25);
+
+        unsigned long aiStart = millis();
 
         if (!client.connect(GEMINI_HOST, 443)) {
             Serial.println("[Gemini] TLS connect failed");
@@ -175,7 +178,10 @@ String callGeminiAPI(camera_fb_t* fb) {
         }
 
         client.stop();
-        Serial.printf("[Gemini] %s responded 200 OK (%u bytes)\n", modelName, response.length());
+        g_metrics.lastAiLatencyMs = millis() - aiStart;
+        g_metrics.activeModel = modelName;
+        Serial.printf("[Gemini] %s responded 200 OK (%u bytes, latency: %ums)\n",
+                      modelName, response.length(), g_metrics.lastAiLatencyMs);
         return response;
     }
 
@@ -430,6 +436,16 @@ String formatTelegramCaption(const GeminiAnalysis& analysis) {
 
     if (analysis.image_quality == "poor") {
         caption += "\n⚠️ Image Quality: Poor (Check lighting/lens)";
+    }
+
+    if (g_metrics.lastAiLatencyMs > 0) {
+        caption += "\n⏱️ *Latency:* " + String((float)g_metrics.lastAiLatencyMs / 1000.0f, 1) + "s (AI)";
+        if (g_metrics.lastUploadLatencyMs > 0) {
+            caption += " + " + String((float)g_metrics.lastUploadLatencyMs / 1000.0f, 1) + "s (Upload)";
+        }
+        if (g_metrics.lastTriggerDelta > 0.0f) {
+            caption += "  •  Δ " + String(g_metrics.lastTriggerDelta, 1) + "%";
+        }
     }
 
     // Keep well within Telegram's 1024-char photo caption limit

@@ -1,6 +1,7 @@
 #include "motion_detector.h"
 #include "camera_driver.h"
 #include "config.h"
+#include "system_metrics.h"
 
 static float baselineLen = 0;
 static bool baselineReady = false;
@@ -18,6 +19,7 @@ void initMotionDetector() {
 
 bool checkOpticalMotion(camera_fb_t** fb_out) {
     if (fb_out) *fb_out = nullptr;
+    unsigned long checkStart = millis();
 
     // 1. Check physical PIR sensor on GPIO13 first (instant hardware trigger if attached)
     #if defined(PIR_GPIO)
@@ -25,6 +27,10 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
         Serial.println("[Motion] TRIGGERED by hardware PIR sensor (GPIO13 HIGH)!");
         camera_fb_t* fb = esp_camera_fb_get();
         if (fb) {
+            g_metrics.motionTriggersCount++;
+            g_metrics.lastTriggerSource = "PIR GPIO13";
+            g_metrics.lastTriggerDelta = 100.0f;
+            g_metrics.lastMotionCheckMs = millis() - checkStart;
             if (fb_out) *fb_out = fb;
             return true;
         }
@@ -35,6 +41,7 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb || fb->len == 0) {
         if (fb) esp_camera_fb_return(fb);
+        g_metrics.lastMotionCheckMs = millis() - checkStart;
         return false;
     }
 
@@ -46,6 +53,7 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
         baselineReady = true;
         Serial.printf("[Motion] Baseline seeded (static frame size: %u bytes)\n", curLen);
         esp_camera_fb_return(fb);
+        g_metrics.lastMotionCheckMs = millis() - checkStart;
         return false;
     }
 
@@ -55,8 +63,13 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
     bool triggered = (delta >= MOTION_SENSITIVITY);
 
     if (triggered) {
-        Serial.printf("[Motion] TRIGGERED! Delta: %.2f%% >= threshold %.1f%% (cur=%u, base=%.0f)\n",
-                      delta * 100.0f, MOTION_SENSITIVITY * 100.0f, curLen, baselineLen);
+        g_metrics.motionTriggersCount++;
+        g_metrics.lastTriggerSource = "Optical";
+        g_metrics.lastTriggerDelta = delta * 100.0f;
+        g_metrics.lastMotionCheckMs = millis() - checkStart;
+
+        Serial.printf("[Motion] TRIGGERED! Delta: %.2f%% >= threshold %.1f%% (cur=%u, base=%.0f, eval=%ums)\n",
+                      delta * 100.0f, MOTION_SENSITIVITY * 100.0f, curLen, baselineLen, g_metrics.lastMotionCheckMs);
         // KEEP THIS EXACT FRAME — it has the moving person in it!
         if (fb_out) {
             *fb_out = fb;
@@ -71,5 +84,6 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
 
     // Release frame immediately
     esp_camera_fb_return(fb);
+    g_metrics.lastMotionCheckMs = millis() - checkStart;
     return false;
 }

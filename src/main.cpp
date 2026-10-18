@@ -14,6 +14,7 @@
 #include "motion_detector.h"
 #include "power_manager.h"
 #include "telegram_client.h"
+#include "system_metrics.h"
 #include <Arduino.h>
 #include <WiFi.h>
 
@@ -40,13 +41,15 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     String geminiRaw = callGeminiAPI(fb);
 
     GeminiAnalysis analysis = parseGeminiResponse(geminiRaw);
-    Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d\n",
+    Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d (AI Latency: %ums)\n",
                   analysis.category.c_str(), analysis.urgency.c_str(),
-                  analysis.people, analysis.packages);
+                  analysis.people, analysis.packages, g_metrics.lastAiLatencyMs);
 
     // Suppress false alarms if configured
     if (SUPPRESS_FALSE_ALARMS && analysis.category == "false_alarm") {
-        Serial.println("[Alert] Suppressed — Gemini classified as false_alarm.");
+        g_metrics.falseAlarmsSuppressed++;
+        Serial.printf("[Alert] Suppressed — Gemini classified as false_alarm (AI: %ums).\n",
+                      g_metrics.lastAiLatencyMs);
         esp_camera_fb_return(fb);
         return;
     }
@@ -54,10 +57,13 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     // Send rich Telegram status card with the exact triggered frame
     String caption = formatTelegramCaption(analysis);
     sendTelegramPhoto(fb, caption);
+    g_metrics.alertsDispatchedCount++;
     esp_camera_fb_return(fb);
 
     lastAlertMs = millis();
-    Serial.println("[Alert] Dispatch complete.");
+    Serial.printf("[Alert] Dispatch complete! [Timing Breakdown] AI: %ums | Upload: %ums | Total: %ums\n",
+                  g_metrics.lastAiLatencyMs, g_metrics.lastUploadLatencyMs,
+                  g_metrics.lastAiLatencyMs + g_metrics.lastUploadLatencyMs);
 }
 
 // ---------------------------------------------------------------------------
