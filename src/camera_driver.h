@@ -2,11 +2,14 @@
 #include <Arduino.h>
 #include "esp_camera.h"
 
+// Get the safe target frame size based on PSRAM availability
+// (HD for boards with PSRAM, QVGA for boards with internal DRAM only)
+framesize_t getTargetFrameSize();
+
 // Initialize the OV2640 camera sensor and apply image DSP tuning
 bool initCamera();
 
-// Capture a raw JPEG frame with no encoding — lightweight, no heap spike.
-// Ensures camera is in HD JPEG mode before capture.
+// Capture a raw JPEG frame with no encoding — lightweight, zero heap spike.
 // Caller MUST call esp_camera_fb_return(fb) when done.
 camera_fb_t* captureJPEG();
 

@@ -17,21 +17,20 @@
 // ---------------------------------------------------------------------------
 #define WIFI_TIMEOUT_MS            10000               // Wi-Fi connection timeout (ms)
 #define WIFI_RECONNECT_INTERVAL_MS 30000               // How often to retry Wi-Fi if dropped (ms)
+#define PIR_GPIO                   GPIO_NUM_13         // Optional hardware PIR pin (auto-fallback)
 
 // ---------------------------------------------------------------------------
-// Optical Motion Detection Configuration
+// Motion Detection Configuration (Optical JPEG + Hardware PIR)
 // ---------------------------------------------------------------------------
-// Pixel-change fraction (0.0–1.0) that must be exceeded to trigger an alert.
-// Lower = more sensitive (catches subtle movement); higher = requires major scene change.
-// Recommended range: 0.04 – 0.10
-#define MOTION_SENSITIVITY         0.06f              // 6% of pixels must change to trigger
+// Combined score threshold (0.0–1.0) that must be exceeded to trigger an optical alert.
+// 0.08 = ~8% combined size & entropy change
+#define MOTION_SENSITIVITY         0.08f
 
 // Minimum milliseconds between successive Gemini/Telegram alerts.
-// Prevents flooding when a person stands at the door for an extended period.
 #define MOTION_COOLDOWN_MS         12000              // 12 seconds between alert cycles
 
-// Milliseconds between surveillance frames (lower = faster detection, slightly more CPU).
-#define MOTION_POLL_INTERVAL_MS    300                // Check frames every 300ms
+// Milliseconds between surveillance frames
+#define MOTION_POLL_INTERVAL_MS    500                // Check frames every 500ms
 
 // If true: Gemini-classified false_alarm events are silently suppressed.
 // If false: false_alarm events still send a low-priority Telegram notification.
@@ -47,5 +46,5 @@
 // Cloud API Endpoints & Models
 // ---------------------------------------------------------------------------
 #define GEMINI_HOST                "generativelanguage.googleapis.com"
-#define GEMINI_MODEL               "gemini-3.8-flash"
+#define GEMINI_MODEL               "gemini-3.5-flash"  // Working model with active quota
 #define TELEGRAM_HOST              "api.telegram.org"

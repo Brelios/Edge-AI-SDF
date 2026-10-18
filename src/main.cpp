@@ -1,10 +1,10 @@
 /*
  * Edge AI Smart Door Feed — Main Firmware Orchestrator
- * ESP32-CAM (AI-Thinker) + Google Gemini 3.8 Flash + Telegram Bot
+ * ESP32-CAM (AI-Thinker) + Google Gemini AI + Telegram Bot
  *
  * Operation mode: Always-connected sentinel
- *   Camera frame differencing → Optical motion trigger
- *   → Gemini 3.8 Flash Vision AI → Rich Telegram status card
+ *   Dual trigger: PIR (GPIO13) or Optical frame variance
+ *   → Gemini Vision AI → Rich Telegram status card
  *   + On-demand Telegram commands: /snap, /status, /motion on|off, /help
  */
 
@@ -23,10 +23,10 @@
 static bool  motionEnabled  = true;   // can be toggled via /motion on|off
 static unsigned long lastAlertMs    = 0;  // timestamp of last Gemini+Telegram dispatch
 static unsigned long lastTelegramMs = 0;  // timestamp of last Telegram command poll
-static unsigned long lastMotionMs   = 0;  // timestamp of last optical motion poll
+static unsigned long lastMotionMs   = 0;  // timestamp of last motion poll
 
 // ---------------------------------------------------------------------------
-// dispatchAlert() — Capture HD frame, call Gemini, send Telegram card
+// dispatchAlert() — Capture frame, call Gemini, send Telegram card
 // ---------------------------------------------------------------------------
 static void dispatchAlert(const char* trigger) {
     Serial.printf("\n>>> [ALERT] Triggered by: %s <<<\n", trigger);
@@ -46,7 +46,7 @@ static void dispatchAlert(const char* trigger) {
 
     // Call Gemini Vision API
     String geminiRaw = callGeminiAPI(base64);
-    base64 = "";  // Immediately free ~80KB heap before Telegram upload
+    base64 = "";  // Immediately release memory before Telegram upload
 
     GeminiAnalysis analysis = parseGeminiResponse(geminiRaw);
     Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d\n",
@@ -78,7 +78,7 @@ void setup() {
     Serial.printf("Chip: ESP32 rev %d  Flash: %u MB  PSRAM: %s\n",
                   ESP.getChipRevision(),
                   ESP.getFlashChipSize() / (1024 * 1024),
-                  psramFound() ? "Detected" : "Not found");
+                  psramFound() ? "Detected" : "Not found (DRAM mode)");
 
     // Step 1: Connect to Wi-Fi (blocks until connected or timeout)
     if (!connectWiFi()) {
@@ -86,7 +86,7 @@ void setup() {
         while (true) { delay(5000); }
     }
 
-    // Step 2: Initialize camera (must happen before motion detector allocation)
+    // Step 2: Initialize camera
     if (!initCamera()) {
         Serial.println("[Setup] FATAL: Camera init failed. Halting.");
         while (true) { delay(5000); }
@@ -96,16 +96,17 @@ void setup() {
     // Step 3: Settle AGC/AWB registers before first frame
     delay(200);
 
-    // Step 4: Initialize optical motion detector (allocates reference frame buffer)
+    // Step 4: Initialize motion detector (PIR + optical)
     initMotionDetector();
 
     // Step 5: Announce readiness on Telegram
+    String resStr = psramFound() ? "OV2640 HD (1280×720)" : "OV2640 QVGA (320×240)";
     String bootMsg =
         "🟢 *Edge AI Door Feed — Online*\n"
         "─────────────────────────\n"
-        "📷 Camera: OV2640 HD (1280×720)\n"
-        "🤖 AI: gemini-3.8-flash\n"
-        "🛡 Optical motion detection: Active\n"
+        "📷 Camera: " + resStr + "\n"
+        "🤖 AI: " + String(GEMINI_MODEL) + "\n"
+        "🛡 Motion detection: Active\n"
         "📶 Wi-Fi: " + WiFi.localIP().toString() + " (" + String(WiFi.RSSI()) + " dBm)\n"
         "💾 Free Heap: " + String(ESP.getFreeHeap() / 1024) + " KB\n\n"
         "Send /help to see available commands.";
@@ -132,13 +133,11 @@ void loop() {
     if (now - lastTelegramMs >= TELEGRAM_POLL_INTERVAL_MS) {
         lastTelegramMs = now;
         bool snapped = processTelegramCommands(motionEnabled);
-        // If /snap just fired, yield without running the motion check this cycle
-        // to avoid competing for camera hardware simultaneously.
         if (snapped) return;
     }
 
     // -----------------------------------------------------------------------
-    // 3. Optical motion detection (when alerts are enabled and cooldown passed)
+    // 3. Motion detection (when alerts are enabled and cooldown passed)
     // -----------------------------------------------------------------------
     if (motionEnabled && (now - lastMotionMs >= MOTION_POLL_INTERVAL_MS)) {
         lastMotionMs = now;
@@ -148,9 +147,9 @@ void loop() {
         if (motionDetected) {
             // Enforce cooldown to avoid spamming during sustained presence
             if (now - lastAlertMs >= MOTION_COOLDOWN_MS) {
-                dispatchAlert("optical_motion");
+                dispatchAlert("motion");
             } else {
-                Serial.printf("[Motion] Motion detected but cooling down (%lus remaining).\n",
+                Serial.printf("[Motion] Cooling down (%lus remaining).\n",
                               (unsigned long)((MOTION_COOLDOWN_MS - (now - lastAlertMs)) / 1000));
             }
         }

@@ -2,98 +2,89 @@
 #include "camera_driver.h"
 #include "config.h"
 
-// ---------------------------------------------------------------------------
-// Internal state — previous frame pixel buffer
-// ---------------------------------------------------------------------------
+static size_t lastJpegLen = 0;
+static const int SAMPLE_COUNT = 32;
+static uint8_t lastSamples[SAMPLE_COUNT];
+static bool baselineReady = false;
 
-// QQVGA = 160x120 = 19,200 pixels — tiny, fast to compare in RAM
-static const int SURVEILLANCE_W = 160;
-static const int SURVEILLANCE_H = 120;
-static const int SURVEILLANCE_PIXELS = SURVEILLANCE_W * SURVEILLANCE_H;
-
-// Allocated in PSRAM when available to avoid eating DRAM
-static uint8_t* prevFrame = nullptr;
-static bool prevFrameReady = false;
-
-// ---------------------------------------------------------------------------
-// initMotionDetector()
-// ---------------------------------------------------------------------------
 void initMotionDetector() {
-    // Allocate previous-frame buffer once at startup
-    if (prevFrame == nullptr) {
-        prevFrame = psramFound()
-            ? (uint8_t*)ps_malloc(SURVEILLANCE_PIXELS)
-            : (uint8_t*)malloc(SURVEILLANCE_PIXELS);
-        if (!prevFrame) {
-            Serial.println("[Motion] ERROR: Failed to allocate prev frame buffer!");
-        } else {
-            memset(prevFrame, 0, SURVEILLANCE_PIXELS);
-            Serial.printf("[Motion] Optical detector ready (%dx%d, sensitivity=%.2f%%)\n",
-                          SURVEILLANCE_W, SURVEILLANCE_H, MOTION_SENSITIVITY * 100.0f);
-        }
-    }
-    prevFrameReady = false;
+    #if defined(PIR_GPIO)
+    pinMode(PIR_GPIO, INPUT_PULLDOWN);
+    #endif
+
+    lastJpegLen = 0;
+    memset(lastSamples, 0, sizeof(lastSamples));
+    baselineReady = false;
+    Serial.printf("[Motion] Detector initialized (PIR=GPIO%d, optical sensitivity=%.2f%%)\n",
+                  PIR_GPIO, MOTION_SENSITIVITY * 100.0f);
 }
 
-// ---------------------------------------------------------------------------
-// checkOpticalMotion()
-// ---------------------------------------------------------------------------
 bool checkOpticalMotion() {
-    if (!prevFrame) return false;
+    // 1. Check physical PIR sensor on GPIO13 first (if attached and HIGH)
+    #if defined(PIR_GPIO)
+    if (digitalRead(PIR_GPIO) == HIGH) {
+        Serial.println("[Motion] TRIGGERED by hardware PIR sensor (GPIO13 HIGH)!");
+        return true;
+    }
+    #endif
 
-    // Step 1: Capture lightweight QQVGA grayscale surveillance frame
-    //         Temporarily reconfigure the camera to tiny QQVGA + GRAYSCALE.
-    sensor_t* s = esp_camera_sensor_get();
-    if (!s) return false;
-
-    s->set_framesize(s, FRAMESIZE_QQVGA);   // 160x120 — tiny and fast
-    s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
-
-    // Discard one frame to flush the DMA pipeline after resolution switch
-    camera_fb_t* flush = esp_camera_fb_get();
-    if (flush) esp_camera_fb_return(flush);
-
+    // 2. Optical check: capture 1 frame using standard JPEG mode (NO resolution switch, NO grayscale switch!)
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-        // Restore HD JPEG mode and bail
-        s->set_framesize(s, FRAMESIZE_HD);
-        s->set_pixformat(s, PIXFORMAT_JPEG);
+    if (!fb || fb->len == 0) {
+        if (fb) esp_camera_fb_return(fb);
         return false;
     }
 
-    // Step 2: Compute mean absolute difference (MAD) between current and previous frame
-    const uint8_t* cur = fb->buf;
-    uint32_t accumulator = 0;
+    size_t curLen = fb->len;
 
-    for (int i = 0; i < SURVEILLANCE_PIXELS; i++) {
-        int diff = (int)cur[i] - (int)prevFrame[i];
-        accumulator += (uint32_t)(diff < 0 ? -diff : diff);
+    // Sample SAMPLE_COUNT bytes from the entropy-coded scan data (after JPEG headers)
+    uint8_t curSamples[SAMPLE_COUNT];
+    size_t startOffset = (curLen > 600) ? 600 : 0;
+    size_t scanLength  = (curLen > startOffset + 50) ? (curLen - startOffset - 50) : 0;
+    size_t step        = scanLength / SAMPLE_COUNT;
+
+    if (step > 0) {
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            curSamples[i] = fb->buf[startOffset + (i * step)];
+        }
+    } else {
+        memset(curSamples, 0, sizeof(curSamples));
     }
 
-    // Step 3: Save current frame as next reference, then release
-    memcpy(prevFrame, cur, SURVEILLANCE_PIXELS);
+    // Always release the framebuffer immediately
     esp_camera_fb_return(fb);
 
-    // Restore full HD JPEG mode for potential Gemini capture
-    s->set_framesize(s, FRAMESIZE_HD);
-    s->set_pixformat(s, PIXFORMAT_JPEG);
-
-    // Step 4: Evaluate threshold
-    float changedFraction = (float)accumulator / (float)(SURVEILLANCE_PIXELS * 255);
-
-    if (!prevFrameReady) {
-        // First call — seed the reference frame, never false-trigger on startup
-        prevFrameReady = true;
-        Serial.printf("[Motion] Reference frame seeded (diff=%.3f%% — startup ignored)\n",
-                      changedFraction * 100.0f);
+    if (!baselineReady || lastJpegLen == 0) {
+        lastJpegLen = curLen;
+        memcpy(lastSamples, curSamples, SAMPLE_COUNT);
+        baselineReady = true;
+        Serial.printf("[Motion] Optical baseline seeded (frame size=%u bytes)\n", curLen);
         return false;
     }
 
-    bool triggered = changedFraction >= MOTION_SENSITIVITY;
+    // Calculate metrics:
+    // Metric A: File size delta (sudden changes in scene complexity alter JPEG entropy)
+    int sizeDiff = abs((int)curLen - (int)lastJpegLen);
+    float sizeDelta = (float)sizeDiff / (float)lastJpegLen;
 
+    // Metric B: Sampled byte divergence across payload
+    int sampleDiff = 0;
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        sampleDiff += abs((int)curSamples[i] - (int)lastSamples[i]);
+    }
+    float sampleDelta = (float)sampleDiff / (float)(SAMPLE_COUNT * 255);
+
+    // Weighted combined motion score
+    float motionScore = (sizeDelta * 0.6f) + (sampleDelta * 0.4f);
+
+    // Smooth update of baseline
+    lastJpegLen = curLen;
+    memcpy(lastSamples, curSamples, SAMPLE_COUNT);
+
+    bool triggered = (motionScore >= MOTION_SENSITIVITY);
     if (triggered) {
-        Serial.printf("[Motion] TRIGGERED! Pixel delta: %.2f%% >= threshold %.2f%%\n",
-                      changedFraction * 100.0f, MOTION_SENSITIVITY * 100.0f);
+        Serial.printf("[Motion] TRIGGERED! Score: %.2f%% >= threshold %.2f%% (sizeDiff=%d bytes, sampleDelta=%.2f%%)\n",
+                      motionScore * 100.0f, MOTION_SENSITIVITY * 100.0f, sizeDiff, sampleDelta * 100.0f);
     }
 
     return triggered;

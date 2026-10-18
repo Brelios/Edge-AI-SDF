@@ -7,20 +7,18 @@
 #include <WiFi.h>
 
 bool sendTelegramPhoto(camera_fb_t* fb, const String& caption) {
-    if (!fb) return false;
+    if (!fb || !fb->buf || fb->len == 0) return false;
 
     WiFiClientSecure client;
     client.setInsecure();
+    client.setTimeout(15);
 
-    HTTPClient http;
-    String url = "https://" + String(TELEGRAM_HOST) +
-                 "/bot" + TELEGRAM_TOKEN + "/sendPhoto";
+    if (!client.connect(TELEGRAM_HOST, 443)) {
+        Serial.println("[Telegram] Connection to api.telegram.org failed");
+        return false;
+    }
 
-    http.begin(client, url);
-    http.setTimeout(15000);
-
-    // Build multipart/form-data manually
-    String boundary = "----ESP32Boundary";
+    String boundary = "----ESP32Boundary7MA4YWxkTrZu0gW";
     String bodyHead =
         "--" + boundary + "\r\n"
         "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n" +
@@ -33,35 +31,56 @@ bool sendTelegramPhoto(camera_fb_t* fb, const String& caption) {
         "Content-Type: image/jpeg\r\n\r\n";
     String bodyTail = "\r\n--" + boundary + "--\r\n";
 
-    http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+    size_t totalLen = bodyHead.length() + fb->len + bodyTail.length();
 
-    size_t headLen = bodyHead.length();
-    size_t tailLen = bodyTail.length();
-    size_t totalLen = headLen + fb->len + tailLen;
+    String request =
+        "POST /bot" + String(TELEGRAM_TOKEN) + "/sendPhoto HTTP/1.1\r\n"
+        "Host: " + String(TELEGRAM_HOST) + "\r\n"
+        "User-Agent: ESP32-CAM\r\n"
+        "Connection: close\r\n"
+        "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n"
+        "Content-Length: " + String(totalLen) + "\r\n\r\n";
 
-    uint8_t* bodyBuf = psramFound() ? (uint8_t*)ps_malloc(totalLen) : (uint8_t*)malloc(totalLen);
-    if (!bodyBuf) {
-        Serial.println("Telegram photo: malloc failed for body buffer");
-        http.end();
+    client.print(request);
+    client.print(bodyHead);
+
+    // Stream JPEG data directly in 1024-byte chunks — zero extra heap allocation
+    const size_t chunkSize = 1024;
+    size_t remaining = fb->len;
+    uint8_t* ptr = fb->buf;
+    while (remaining > 0) {
+        size_t toWrite = (remaining < chunkSize) ? remaining : chunkSize;
+        size_t written = client.write(ptr, toWrite);
+        if (written == 0) {
+            Serial.println("[Telegram] client.write stalled");
+            break;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+
+    client.print(bodyTail);
+    client.flush();
+
+    // Read response status
+    int httpCode = 0;
+    unsigned long startMs = millis();
+    while (client.connected() && (millis() - startMs < 10000)) {
+        String line = client.readStringUntil('\n');
+        if (line.startsWith("HTTP/1.1 ") || line.startsWith("HTTP/1.0 ")) {
+            httpCode = line.substring(9, 12).toInt();
+            break;
+        }
+    }
+    client.stop();
+
+    if (httpCode == 200) {
+        Serial.println("[Telegram] Photo sent successfully!");
+        return true;
+    } else {
+        Serial.printf("[Telegram] sendPhoto error, HTTP code: %d\n", httpCode);
         return false;
     }
-    memcpy(bodyBuf,                     bodyHead.c_str(), headLen);
-    memcpy(bodyBuf + headLen,           fb->buf,          fb->len);
-    memcpy(bodyBuf + headLen + fb->len, bodyTail.c_str(), tailLen);
-
-    int httpCode = http.sendRequest("POST", bodyBuf, totalLen);
-    free(bodyBuf);
-
-    if (httpCode != 200) {
-        Serial.printf("Telegram photo HTTP error: %d\n", httpCode);
-        Serial.println(http.getString().substring(0, 200));
-        http.end();
-        return false;
-    }
-
-    Serial.println("Telegram photo sent OK");
-    http.end();
-    return true;
 }
 
 bool sendTelegramMessage(const String& text) {
@@ -86,12 +105,12 @@ bool sendTelegramMessage(const String& text) {
 
     int httpCode = http.POST(body);
     if (httpCode != 200) {
-        Serial.printf("Telegram message HTTP error: %d\n", httpCode);
+        Serial.printf("[Telegram] sendMessage HTTP error: %d\n", httpCode);
         http.end();
         return false;
     }
 
-    Serial.println("Telegram message sent OK");
+    Serial.println("[Telegram] Message sent OK");
     http.end();
     return true;
 }
@@ -106,12 +125,11 @@ bool sendTelegramMessage(const String& text) {
 bool processTelegramCommands(bool& motionEnabled) {
     WiFiClientSecure client;
     client.setInsecure();
-    client.setTimeout(8);  // short socket timeout to stay non-blocking
+    client.setTimeout(8);
 
     HTTPClient http;
 
     // Persistent update offset to avoid re-processing old messages.
-    // Survives across calls via static storage.
     static long updateOffset = 0;
 
     String url = "https://" + String(TELEGRAM_HOST) +
@@ -146,8 +164,8 @@ bool processTelegramCommands(bool& motionEnabled) {
         updateOffset = updateId + 1;  // Advance past this update
 
         // Extract message fields
-        const char* text    = update["message"]["text"] | "";
-        long        chatId  = update["message"]["chat"]["id"] | 0L;
+        const char* text     = update["message"]["text"] | "";
+        long        chatId   = update["message"]["chat"]["id"] | 0L;
         const char* username = update["message"]["chat"]["username"] | "unknown";
 
         // Security check: ignore messages not from the owner's chat
@@ -161,27 +179,18 @@ bool processTelegramCommands(bool& motionEnabled) {
         Serial.printf("[Telegram] Command from @%s: %s\n", username, cmd.c_str());
 
         // ---------------------------------------------------------------
-        // /snap — Instantly capture and send a live HD photo (no Gemini)
+        // /snap — Instantly capture and send a live photo (zero Gemini, zero base64)
         // ---------------------------------------------------------------
         if (cmd == "/snap") {
-            // Guard: need at least 80KB free to safely allocate the Telegram multipart buffer
-            if (ESP.getFreeHeap() < 80000) {
-                sendTelegramMessage("⚠️ Snap unavailable — low memory (" +
-                                    String(ESP.getFreeHeap() / 1024) + " KB free). Try again shortly.");
-                updateOffset = updateId + 1;
-                continue;
-            }
-
-            // Raw JPEG capture — no base64, no Gemini, instant dispatch
             camera_fb_t* fb = captureJPEG();
             if (fb) {
-                String caption = "📸 Live Snap  •  " + String(fb->width) + "×" + String(fb->height) +
+                String caption = "📸 *Live Snap*  •  " + String(fb->width) + "×" + String(fb->height) +
                                  "  |  📶 " + String(WiFi.RSSI()) + " dBm";
                 sendTelegramPhoto(fb, caption);
                 esp_camera_fb_return(fb);
                 snapped = true;
             } else {
-                sendTelegramMessage("❌ Snap failed — camera unavailable. Check Serial Monitor.");
+                sendTelegramMessage("❌ Snap failed — camera capture error.");
             }
         }
 
@@ -193,6 +202,7 @@ bool processTelegramCommands(bool& motionEnabled) {
             uint32_t upHr   = upSec / 3600;
             uint32_t upMin  = (upSec % 3600) / 60;
 
+            String resStr = psramFound() ? "OV2640 HD (1280×720)" : "OV2640 QVGA (320×240)";
             String msg =
                 "🖥 *Edge AI Door Feed — System Status*\n"
                 "─────────────────────────\n"
@@ -201,14 +211,14 @@ bool processTelegramCommands(bool& motionEnabled) {
                 "🌐 *Local IP:* " + WiFi.localIP().toString() + "\n"
                 "🛡 *Motion Alerts:* " + String(motionEnabled ? "✅ Active" : "⏸ Paused") + "\n"
                 "🧠 *Free Heap:* " + String(ESP.getFreeHeap() / 1024) + " KB\n"
-                "💾 *Free PSRAM:* " + (psramFound() ? String(ESP.getFreePsram() / 1024) + " KB" : "N/A") + "\n"
-                "📷 *Camera:* OV2640 HD (1280×720)\n"
-                "🤖 *AI Model:* gemini-3.8-flash";
+                "💾 *PSRAM:* " + (psramFound() ? String(ESP.getFreePsram() / 1024) + " KB" : "Disabled (DRAM mode)") + "\n"
+                "📷 *Camera:* " + resStr + "\n"
+                "🤖 *AI Model:* " + String(GEMINI_MODEL);
             sendTelegramMessage(msg);
         }
 
         // ---------------------------------------------------------------
-        // /motion off — Pause automatic Gemini + Telegram motion alerts
+        // /motion off — Pause automatic motion alerts
         // ---------------------------------------------------------------
         else if (cmd == "/motion off") {
             motionEnabled = false;
@@ -216,7 +226,7 @@ bool processTelegramCommands(bool& motionEnabled) {
         }
 
         // ---------------------------------------------------------------
-        // /motion on — Re-enable automatic Gemini + Telegram alerts
+        // /motion on — Re-enable automatic motion alerts
         // ---------------------------------------------------------------
         else if (cmd == "/motion on") {
             motionEnabled = true;
@@ -230,7 +240,7 @@ bool processTelegramCommands(bool& motionEnabled) {
             String helpMsg =
                 "🤖 *Edge AI Door Feed — Commands*\n"
                 "─────────────────────────\n"
-                "📸 /snap — Capture a live HD photo now\n"
+                "📸 /snap — Capture a live photo now\n"
                 "🖥 /status — System health & diagnostics\n"
                 "⏸ /motion off — Pause automatic AI alerts\n"
                 "✅ /motion on — Resume automatic AI alerts\n"
@@ -239,7 +249,6 @@ bool processTelegramCommands(bool& motionEnabled) {
         }
 
         else {
-            // Unknown command
             sendTelegramMessage("❓ Unknown command. Send /help to see what's available.");
         }
     }

@@ -2,6 +2,10 @@
 #include "board_config.h"
 #include "mbedtls/base64.h"
 
+framesize_t getTargetFrameSize() {
+    return psramFound() ? FRAMESIZE_HD : FRAMESIZE_QVGA;
+}
+
 bool initCamera() {
     // Hardware reset sensor via PWDN if available to clear hung I2C/SCCB state
     #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM != -1)
@@ -34,7 +38,7 @@ bool initCamera() {
     config.pixel_format = PIXFORMAT_JPEG;
 
     if (psramFound()) {
-        Serial.println("PSRAM found — configuring HD (1280x720)");
+        Serial.println("[Camera] PSRAM found — configuring HD (1280x720)");
         config.frame_size   = FRAMESIZE_HD;
         config.jpeg_quality = 10;
         config.fb_count     = 2;
@@ -43,9 +47,9 @@ bool initCamera() {
         config.xclk_freq_hz = 20000000;
         config.jpeg_buffer_size = 0;
     } else {
-        Serial.println("No PSRAM — using DRAM with 10MHz clock, HQVGA, and 32KB buffer");
-        config.frame_size   = FRAMESIZE_HQVGA;      // 240x176
-        config.jpeg_quality = 20;                  // Quality 20: reliable size (~8-12KB)
+        Serial.println("[Camera] No PSRAM — using DRAM with 10MHz clock, QVGA (320x240), and 32KB buffer");
+        config.frame_size   = FRAMESIZE_QVGA;       // 320x240 fits reliably in DRAM
+        config.jpeg_quality = 14;                  // Quality 14 gives clean sharp image (~12-16KB)
         config.fb_count     = 1;                   // Single buffer saves precious DRAM
         config.fb_location  = CAMERA_FB_IN_DRAM;
         config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
@@ -55,7 +59,7 @@ bool initCamera() {
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("esp_camera_init failed: 0x%x\n", err);
+        Serial.printf("[Camera] esp_camera_init failed: 0x%x\n", err);
         return false;
     }
 
@@ -84,31 +88,20 @@ bool initCamera() {
 }
 
 camera_fb_t* captureJPEG() {
-    // Restore HD JPEG mode — motion detector may have left sensor in QQVGA grayscale
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        s->set_framesize(s, FRAMESIZE_HD);
+        s->set_framesize(s, getTargetFrameSize());
         s->set_pixformat(s, PIXFORMAT_JPEG);
     }
 
-    // Discard two stale frames to flush DMA and let AWB/AEC settle after mode switch
-    for (int i = 0; i < 2; i++) {
-        camera_fb_t* flush = esp_camera_fb_get();
-        if (flush) esp_camera_fb_return(flush);
-        delay(40);
-    }
+    // Flush stale frame to ensure fresh capture
+    camera_fb_t* flush = esp_camera_fb_get();
+    if (flush) esp_camera_fb_return(flush);
 
-    // Capture with up to 3 retries
-    camera_fb_t* fb = nullptr;
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        fb = esp_camera_fb_get();
-        if (fb) break;
-        Serial.printf("[captureJPEG] Attempt %d null — retrying in 150ms...\n", attempt);
-        delay(150);
-    }
-
+    // Capture fresh frame
+    camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("[captureJPEG] Capture failed after 3 attempts");
+        Serial.println("[captureJPEG] Capture returned null");
         return nullptr;
     }
 
@@ -117,35 +110,18 @@ camera_fb_t* captureJPEG() {
 }
 
 String captureAndEncodeJPEG(camera_fb_t** fb_out) {
-    Serial.println("Stabilizing sensor & capturing fresh frame...");
-
-    // Discard initial frames to let AEC/AWB converge and clear stale DMA buffer
-    for (int i = 0; i < 4; i++) {
-        camera_fb_t* dummy = esp_camera_fb_get();
-        if (dummy) esp_camera_fb_return(dummy);
-        delay(40);
-    }
-
-    camera_fb_t* fb = nullptr;
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        fb = esp_camera_fb_get();
-        if (fb) break;
-        Serial.printf("Attempt %d returned null, retrying in 200ms...\n", attempt);
-        delay(200);
-    }
-
+    camera_fb_t* fb = captureJPEG();
     if (!fb) {
-        Serial.println("Camera capture failed completely");
+        *fb_out = nullptr;
         return "";
     }
     *fb_out = fb;
-    Serial.printf("Captured frame: %u bytes (%dx%d)\n", fb->len, fb->width, fb->height);
 
-    // Calculate Base64 output size and allocate buffer in PSRAM if available
+    // Calculate Base64 output size and allocate buffer
     size_t encodedLen = ((fb->len + 2) / 3) * 4 + 1;
     uint8_t* encodedBuf = psramFound() ? (uint8_t*)ps_malloc(encodedLen) : (uint8_t*)malloc(encodedLen);
     if (!encodedBuf) {
-        Serial.println("Base64 malloc failed");
+        Serial.println("[captureAndEncodeJPEG] Base64 malloc failed");
         return "";
     }
 
@@ -153,7 +129,7 @@ String captureAndEncodeJPEG(camera_fb_t** fb_out) {
     int ret = mbedtls_base64_encode(encodedBuf, encodedLen, &outLen,
                                     fb->buf, fb->len);
     if (ret != 0) {
-        Serial.printf("Base64 encode failed: %d\n", ret);
+        Serial.printf("[captureAndEncodeJPEG] Base64 encode failed: %d\n", ret);
         free(encodedBuf);
         return "";
     }
