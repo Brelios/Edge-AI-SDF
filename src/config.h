@@ -29,8 +29,8 @@
 // Minimum milliseconds between successive Gemini/Telegram alerts.
 #define MOTION_COOLDOWN_MS         12000              // 12 seconds between alert cycles
 
-// Milliseconds between surveillance frames
-#define MOTION_POLL_INTERVAL_MS    500                // Check frames every 500ms
+// Milliseconds between surveillance frames (200ms = 5 checks per second for fast reaction)
+#define MOTION_POLL_INTERVAL_MS    200
 
 // If true: Gemini-classified false_alarm events are silently suppressed.
 // If false: false_alarm events still send a low-priority Telegram notification.
@@ -39,8 +39,9 @@
 // ---------------------------------------------------------------------------
 // Telegram Remote Command Polling
 // ---------------------------------------------------------------------------
-// How often the firmware checks Telegram for incoming commands (/snap, /status, etc.)
-#define TELEGRAM_POLL_INTERVAL_MS  1500               // Poll every 1.5 seconds
+// Check Telegram for incoming commands (/snap, /status, etc.) every 3.5s
+// so camera motion loop runs with high frame rate and zero stutter.
+#define TELEGRAM_POLL_INTERVAL_MS  3500
 
 // ---------------------------------------------------------------------------
 // Cloud API Endpoints & Models

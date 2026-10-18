@@ -19,16 +19,22 @@ void initMotionDetector() {
                   PIR_GPIO, MOTION_SENSITIVITY * 100.0f);
 }
 
-bool checkOpticalMotion() {
+bool checkOpticalMotion(camera_fb_t** fb_out) {
+    if (fb_out) *fb_out = nullptr;
+
     // 1. Check physical PIR sensor on GPIO13 first (if attached and HIGH)
     #if defined(PIR_GPIO)
     if (digitalRead(PIR_GPIO) == HIGH) {
         Serial.println("[Motion] TRIGGERED by hardware PIR sensor (GPIO13 HIGH)!");
-        return true;
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (fb) {
+            if (fb_out) *fb_out = fb;
+            return true;
+        }
     }
     #endif
 
-    // 2. Optical check: capture 1 frame using standard JPEG mode (NO resolution switch, NO grayscale switch!)
+    // 2. Optical check: capture 1 frame in stable JPEG mode
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb || fb->len == 0) {
         if (fb) esp_camera_fb_return(fb);
@@ -51,18 +57,15 @@ bool checkOpticalMotion() {
         memset(curSamples, 0, sizeof(curSamples));
     }
 
-    // Always release the framebuffer immediately
-    esp_camera_fb_return(fb);
-
     if (!baselineReady || lastJpegLen == 0) {
         lastJpegLen = curLen;
         memcpy(lastSamples, curSamples, SAMPLE_COUNT);
         baselineReady = true;
         Serial.printf("[Motion] Optical baseline seeded (frame size=%u bytes)\n", curLen);
+        esp_camera_fb_return(fb);
         return false;
     }
 
-    // Calculate metrics:
     // Metric A: File size delta (sudden changes in scene complexity alter JPEG entropy)
     int sizeDiff = abs((int)curLen - (int)lastJpegLen);
     float sizeDelta = (float)sizeDiff / (float)lastJpegLen;
@@ -77,7 +80,7 @@ bool checkOpticalMotion() {
     // Weighted combined motion score
     float motionScore = (sizeDelta * 0.6f) + (sampleDelta * 0.4f);
 
-    // Smooth update of baseline
+    // Update baseline
     lastJpegLen = curLen;
     memcpy(lastSamples, curSamples, SAMPLE_COUNT);
 
@@ -85,7 +88,16 @@ bool checkOpticalMotion() {
     if (triggered) {
         Serial.printf("[Motion] TRIGGERED! Score: %.2f%% >= threshold %.2f%% (sizeDiff=%d bytes, sampleDelta=%.2f%%)\n",
                       motionScore * 100.0f, MOTION_SENSITIVITY * 100.0f, sizeDiff, sampleDelta * 100.0f);
+        // KEEP THIS EXACT FRAME — it has the moving person in it!
+        if (fb_out) {
+            *fb_out = fb;
+        } else {
+            esp_camera_fb_return(fb);
+        }
+        return true;
     }
 
-    return triggered;
+    // No motion: release frame immediately
+    esp_camera_fb_return(fb);
+    return false;
 }

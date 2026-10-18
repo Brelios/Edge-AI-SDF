@@ -26,27 +26,27 @@ static unsigned long lastTelegramMs = 0;  // timestamp of last Telegram command 
 static unsigned long lastMotionMs   = 0;  // timestamp of last motion poll
 
 // ---------------------------------------------------------------------------
-// dispatchAlert() — Capture frame, call Gemini, send Telegram card
+// dispatchAlert() — Call Gemini, send Telegram card using the TRIGGER frame!
+// Zero delay: uses the exact frame that detected the motion.
 // ---------------------------------------------------------------------------
-static void dispatchAlert(const char* trigger) {
+static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
+    if (!fb || fb->len == 0) return;
+
     Serial.printf("\n>>> [ALERT] Triggered by: %s <<<\n", trigger);
-    Serial.printf("    Free heap: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("    Trigger frame: %u bytes (%dx%d)  Free heap: %u bytes\n",
+                  fb->len, fb->width, fb->height, ESP.getFreeHeap());
 
-    camera_fb_t* fb      = nullptr;
-    String       base64  = captureAndEncodeJPEG(&fb);
-
-    if (base64.isEmpty() || fb == nullptr) {
-        Serial.println("[Alert] Capture failed — skipping this cycle.");
-        if (fb) esp_camera_fb_return(fb);
+    // Encode the already-captured motion frame to Base64
+    String base64 = encodeFBtoBase64(fb);
+    if (base64.isEmpty()) {
+        Serial.println("[Alert] Base64 encoding failed.");
+        esp_camera_fb_return(fb);
         return;
     }
 
-    Serial.printf("[Alert] Frame captured: %u bytes (%dx%d)\n",
-                  fb->len, fb->width, fb->height);
-
     // Call Gemini Vision API
     String geminiRaw = callGeminiAPI(base64);
-    base64 = "";  // Immediately release memory before Telegram upload
+    base64 = "";  // Free base64 string from heap immediately before Telegram upload
 
     GeminiAnalysis analysis = parseGeminiResponse(geminiRaw);
     Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d\n",
@@ -60,7 +60,7 @@ static void dispatchAlert(const char* trigger) {
         return;
     }
 
-    // Send rich Telegram status card with the captured JPEG
+    // Send rich Telegram status card with the exact triggered frame
     String caption = formatTelegramCaption(analysis);
     sendTelegramPhoto(fb, caption);
     esp_camera_fb_return(fb);
@@ -106,7 +106,7 @@ void setup() {
         "─────────────────────────\n"
         "📷 Camera: " + resStr + "\n"
         "🤖 AI: " + String(GEMINI_MODEL) + "\n"
-        "🛡 Motion detection: Active\n"
+        "🛡 Motion detection: Active (Zero-Lag Trigger)\n"
         "📶 Wi-Fi: " + WiFi.localIP().toString() + " (" + String(WiFi.RSSI()) + " dBm)\n"
         "💾 Free Heap: " + String(ESP.getFreeHeap() / 1024) + " KB\n\n"
         "Send /help to see available commands.";
@@ -137,20 +137,22 @@ void loop() {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Motion detection (when alerts are enabled and cooldown passed)
+    // 3. High-speed motion detection (checked every 200ms)
+    //    Zero delay: the frame where motion is detected is dispatched directly!
     // -----------------------------------------------------------------------
     if (motionEnabled && (now - lastMotionMs >= MOTION_POLL_INTERVAL_MS)) {
         lastMotionMs = now;
 
-        bool motionDetected = checkOpticalMotion();
+        camera_fb_t* motionFb = nullptr;
+        bool motionDetected = checkOpticalMotion(&motionFb);
 
-        if (motionDetected) {
-            // Enforce cooldown to avoid spamming during sustained presence
+        if (motionDetected && motionFb != nullptr) {
             if (now - lastAlertMs >= MOTION_COOLDOWN_MS) {
-                dispatchAlert("motion");
+                dispatchAlert(motionFb, "motion");
             } else {
                 Serial.printf("[Motion] Cooling down (%lus remaining).\n",
                               (unsigned long)((MOTION_COOLDOWN_MS - (now - lastAlertMs)) / 1000));
+                esp_camera_fb_return(motionFb);
             }
         }
     }

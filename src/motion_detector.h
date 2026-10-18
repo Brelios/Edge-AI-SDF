@@ -6,7 +6,8 @@
 void initMotionDetector();
 
 // Poll for motion:
-// Checks PIR GPIO13 (instant hardware trigger if sensor attached)
-// AND checks optical JPEG frame variance (works without PIR sensor)
-// Returns true if motion was detected.
-bool checkOpticalMotion();
+// Checks PIR GPIO13 and optical JPEG frame variance.
+// If motion is detected, *fb_out is assigned the EXACT frame that triggered the motion!
+// The caller MUST call esp_camera_fb_return(*fb_out) when done.
+// If motion is not detected, returns false and *fb_out is nullptr.
+bool checkOpticalMotion(camera_fb_t** fb_out);

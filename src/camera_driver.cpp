@@ -7,15 +7,6 @@ framesize_t getTargetFrameSize() {
 }
 
 bool initCamera() {
-    // Hardware reset sensor via PWDN if available to clear hung I2C/SCCB state
-    #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM != -1)
-    pinMode(PWDN_GPIO_NUM, OUTPUT);
-    digitalWrite(PWDN_GPIO_NUM, HIGH); // Power off sensor
-    delay(50);
-    digitalWrite(PWDN_GPIO_NUM, LOW);  // Power on sensor
-    delay(50);
-    #endif
-
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer   = LEDC_TIMER_0;
@@ -57,9 +48,24 @@ bool initCamera() {
         config.jpeg_buffer_size = 32768;           // 32 KB buffer (prevents FB-OVF)
     }
 
-    esp_err_t err = esp_camera_init(&config);
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM != -1)
+        pinMode(PWDN_GPIO_NUM, OUTPUT);
+        digitalWrite(PWDN_GPIO_NUM, HIGH); // Power off sensor
+        delay(100);
+        digitalWrite(PWDN_GPIO_NUM, LOW);  // Power on sensor
+        delay(200);                         // Allow OV2640 oscillator to stabilize
+        #endif
+
+        err = esp_camera_init(&config);
+        if (err == ESP_OK) break;
+        Serial.printf("[Camera] Init attempt %d failed (0x%x), retrying in 400ms...\n", attempt, err);
+        delay(400);
+    }
+
     if (err != ESP_OK) {
-        Serial.printf("[Camera] esp_camera_init failed: 0x%x\n", err);
+        Serial.printf("[Camera] esp_camera_init failed completely: 0x%x\n", err);
         return false;
     }
 
@@ -109,19 +115,13 @@ camera_fb_t* captureJPEG() {
     return fb;
 }
 
-String captureAndEncodeJPEG(camera_fb_t** fb_out) {
-    camera_fb_t* fb = captureJPEG();
-    if (!fb) {
-        *fb_out = nullptr;
-        return "";
-    }
-    *fb_out = fb;
+String encodeFBtoBase64(camera_fb_t* fb) {
+    if (!fb || !fb->buf || fb->len == 0) return "";
 
-    // Calculate Base64 output size and allocate buffer
     size_t encodedLen = ((fb->len + 2) / 3) * 4 + 1;
     uint8_t* encodedBuf = psramFound() ? (uint8_t*)ps_malloc(encodedLen) : (uint8_t*)malloc(encodedLen);
     if (!encodedBuf) {
-        Serial.println("[captureAndEncodeJPEG] Base64 malloc failed");
+        Serial.println("[encodeFBtoBase64] Base64 malloc failed");
         return "";
     }
 
@@ -129,7 +129,7 @@ String captureAndEncodeJPEG(camera_fb_t** fb_out) {
     int ret = mbedtls_base64_encode(encodedBuf, encodedLen, &outLen,
                                     fb->buf, fb->len);
     if (ret != 0) {
-        Serial.printf("[captureAndEncodeJPEG] Base64 encode failed: %d\n", ret);
+        Serial.printf("[encodeFBtoBase64] Base64 encode failed: %d\n", ret);
         free(encodedBuf);
         return "";
     }
@@ -138,4 +138,14 @@ String captureAndEncodeJPEG(camera_fb_t** fb_out) {
     String encoded = String((char*)encodedBuf);
     free(encodedBuf);
     return encoded;
+}
+
+String captureAndEncodeJPEG(camera_fb_t** fb_out) {
+    camera_fb_t* fb = captureJPEG();
+    if (!fb) {
+        if (fb_out) *fb_out = nullptr;
+        return "";
+    }
+    if (fb_out) *fb_out = fb;
+    return encodeFBtoBase64(fb);
 }
