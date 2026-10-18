@@ -2,9 +2,7 @@
 #include "camera_driver.h"
 #include "config.h"
 
-static size_t lastJpegLen = 0;
-static const int SAMPLE_COUNT = 32;
-static uint8_t lastSamples[SAMPLE_COUNT];
+static float baselineLen = 0;
 static bool baselineReady = false;
 
 void initMotionDetector() {
@@ -12,17 +10,16 @@ void initMotionDetector() {
     pinMode(PIR_GPIO, INPUT_PULLDOWN);
     #endif
 
-    lastJpegLen = 0;
-    memset(lastSamples, 0, sizeof(lastSamples));
+    baselineLen = 0;
     baselineReady = false;
-    Serial.printf("[Motion] Detector initialized (PIR=GPIO%d, optical sensitivity=%.2f%%)\n",
+    Serial.printf("[Motion] Detector initialized (PIR=GPIO%d, optical threshold=%.1f%%)\n",
                   PIR_GPIO, MOTION_SENSITIVITY * 100.0f);
 }
 
 bool checkOpticalMotion(camera_fb_t** fb_out) {
     if (fb_out) *fb_out = nullptr;
 
-    // 1. Check physical PIR sensor on GPIO13 first (if attached and HIGH)
+    // 1. Check physical PIR sensor on GPIO13 first (instant hardware trigger if attached)
     #if defined(PIR_GPIO)
     if (digitalRead(PIR_GPIO) == HIGH) {
         Serial.println("[Motion] TRIGGERED by hardware PIR sensor (GPIO13 HIGH)!");
@@ -43,51 +40,23 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
 
     size_t curLen = fb->len;
 
-    // Sample SAMPLE_COUNT bytes from the entropy-coded scan data (after JPEG headers)
-    uint8_t curSamples[SAMPLE_COUNT];
-    size_t startOffset = (curLen > 600) ? 600 : 0;
-    size_t scanLength  = (curLen > startOffset + 50) ? (curLen - startOffset - 50) : 0;
-    size_t step        = scanLength / SAMPLE_COUNT;
-
-    if (step > 0) {
-        for (int i = 0; i < SAMPLE_COUNT; i++) {
-            curSamples[i] = fb->buf[startOffset + (i * step)];
-        }
-    } else {
-        memset(curSamples, 0, sizeof(curSamples));
-    }
-
-    if (!baselineReady || lastJpegLen == 0) {
-        lastJpegLen = curLen;
-        memcpy(lastSamples, curSamples, SAMPLE_COUNT);
+    // Seed baseline on first boot frame
+    if (!baselineReady || baselineLen <= 0) {
+        baselineLen = (float)curLen;
         baselineReady = true;
-        Serial.printf("[Motion] Optical baseline seeded (frame size=%u bytes)\n", curLen);
+        Serial.printf("[Motion] Baseline seeded (static frame size: %u bytes)\n", curLen);
         esp_camera_fb_return(fb);
         return false;
     }
 
-    // Metric A: File size delta (sudden changes in scene complexity alter JPEG entropy)
-    int sizeDiff = abs((int)curLen - (int)lastJpegLen);
-    float sizeDelta = (float)sizeDiff / (float)lastJpegLen;
+    // Metric: Relative change in JPEG entropy compared to ambient baseline
+    float delta = (float)abs((int)curLen - (int)baselineLen) / baselineLen;
 
-    // Metric B: Sampled byte divergence across payload
-    int sampleDiff = 0;
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        sampleDiff += abs((int)curSamples[i] - (int)lastSamples[i]);
-    }
-    float sampleDelta = (float)sampleDiff / (float)(SAMPLE_COUNT * 255);
+    bool triggered = (delta >= MOTION_SENSITIVITY);
 
-    // Weighted combined motion score
-    float motionScore = (sizeDelta * 0.6f) + (sampleDelta * 0.4f);
-
-    // Update baseline
-    lastJpegLen = curLen;
-    memcpy(lastSamples, curSamples, SAMPLE_COUNT);
-
-    bool triggered = (motionScore >= MOTION_SENSITIVITY);
     if (triggered) {
-        Serial.printf("[Motion] TRIGGERED! Score: %.2f%% >= threshold %.2f%% (sizeDiff=%d bytes, sampleDelta=%.2f%%)\n",
-                      motionScore * 100.0f, MOTION_SENSITIVITY * 100.0f, sizeDiff, sampleDelta * 100.0f);
+        Serial.printf("[Motion] TRIGGERED! Delta: %.2f%% >= threshold %.1f%% (cur=%u, base=%.0f)\n",
+                      delta * 100.0f, MOTION_SENSITIVITY * 100.0f, curLen, baselineLen);
         // KEEP THIS EXACT FRAME — it has the moving person in it!
         if (fb_out) {
             *fb_out = fb;
@@ -97,7 +66,10 @@ bool checkOpticalMotion(camera_fb_t** fb_out) {
         return true;
     }
 
-    // No motion: release frame immediately
+    // No motion detected: gently update baseline with slow EMA (adapts to sunlight/clouds)
+    baselineLen = (0.95f * baselineLen) + (0.05f * (float)curLen);
+
+    // Release frame immediately
     esp_camera_fb_return(fb);
     return false;
 }

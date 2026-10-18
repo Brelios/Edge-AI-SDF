@@ -36,17 +36,8 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     Serial.printf("    Trigger frame: %u bytes (%dx%d)  Free heap: %u bytes\n",
                   fb->len, fb->width, fb->height, ESP.getFreeHeap());
 
-    // Encode the already-captured motion frame to Base64
-    String base64 = encodeFBtoBase64(fb);
-    if (base64.isEmpty()) {
-        Serial.println("[Alert] Base64 encoding failed.");
-        esp_camera_fb_return(fb);
-        return;
-    }
-
-    // Call Gemini Vision API
-    String geminiRaw = callGeminiAPI(base64);
-    base64 = "";  // Free base64 string from heap immediately before Telegram upload
+    // Call Gemini Vision API directly streaming the frame (zero heap Base64 allocation)
+    String geminiRaw = callGeminiAPI(fb);
 
     GeminiAnalysis analysis = parseGeminiResponse(geminiRaw);
     Serial.printf("[Alert] Gemini → category=%s  urgency=%s  people=%d  packages=%d\n",
@@ -147,7 +138,8 @@ void loop() {
         bool motionDetected = checkOpticalMotion(&motionFb);
 
         if (motionDetected && motionFb != nullptr) {
-            if (now - lastAlertMs >= MOTION_COOLDOWN_MS) {
+            bool canAlert = (lastAlertMs == 0) || (now - lastAlertMs >= MOTION_COOLDOWN_MS);
+            if (canAlert) {
                 dispatchAlert(motionFb, "motion");
             } else {
                 Serial.printf("[Motion] Cooling down (%lus remaining).\n",

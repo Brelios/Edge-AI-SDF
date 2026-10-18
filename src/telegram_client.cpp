@@ -125,7 +125,7 @@ bool sendTelegramMessage(const String& text) {
 bool processTelegramCommands(bool& motionEnabled) {
     WiFiClientSecure client;
     client.setInsecure();
-    client.setTimeout(3);
+    client.setTimeout(5);
 
     HTTPClient http;
 
@@ -137,7 +137,7 @@ bool processTelegramCommands(bool& motionEnabled) {
                  "/getUpdates?timeout=0&limit=5&offset=" + String(updateOffset);
 
     http.begin(client, url);
-    http.setTimeout(3000);
+    http.setTimeout(5000);
     int httpCode = http.GET();
 
     if (httpCode != 200) {

@@ -1,113 +1,281 @@
 #include "gemini_client.h"
 #include "config.h"
+#include "camera_driver.h"
+#include "mbedtls/base64.h"
 #include <WiFiClientSecure.h>
-#include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-String callGeminiAPI(const String& base64Image) {
-    WiFiClientSecure client;
-    client.setInsecure();   // Skip cert validation (no embedded CA)
-    client.setTimeout(30);  // seconds — TLS handshake + large upload headroom
+static const char* GEMINI_MODELS[] = {
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.5-flash"
+};
+static const int NUM_MODELS = sizeof(GEMINI_MODELS) / sizeof(GEMINI_MODELS[0]);
+static int currentModelIdx = 0;
 
-    HTTPClient http;
-    String url = "https://" + String(GEMINI_HOST) +
-                 "/v1beta/models/" + GEMINI_MODEL +
-                 ":generateContent";
+static const char systemPrompt[] =
+    "You are an autonomous AI doorstep security assistant for a home entrance camera. "
+    "Analyze the provided single still frame from the front door camera. "
+    "Provide a factual, objective, and accurate assessment. Never assume intent or invent details not clearly visible. "
+    "Do not use conversational filler; start directly with the subject. "
+    "CATEGORIZATION: "
+    "- delivery: couriers with uniforms, safety vests, scanner devices, packages, mailers, or parcel drop-offs. "
+    "- resident_visitor: people approaching normally, knocking, ringing the bell, or entering/exiting peacefully. "
+    "- suspicious: loitering without knocking/ringing, face deliberately concealed (hood/mask/gaiter), window peering, or hesitant night lingering. "
+    "- threat: forced entry, tampering with door locks/handles, visible weapons or tools, aggressive actions, or package theft in progress. "
+    "- animal: pets (dogs, cats) or wildlife in the field of view. "
+    "- false_alarm: empty doorstep, tree branches swaying in wind, moving shadows, vehicle headlights, glare, or insects/rain on the lens. "
+    "URGENCY: "
+    "- none: false alarms, empty scene, harmless wildlife, or ambient motion. "
+    "- low: routine parcel delivery, resident arrival/departure, or familiar visitor. "
+    "- medium: unfamiliar person loitering, peering in windows, or concealing identity. "
+    "- high: active break-in attempt, lock manipulation, package theft, or immediate hazard. "
+    "SUMMARY: Exactly 1 to 2 clear, concise sentences. "
+    "IMAGE QUALITY: 'poor' if too dark, blurry, or blocked; otherwise 'good'. "
+    "ACTIONS: 1 to 2 imperative suggestions under 8 words each.";
 
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-goog-api-key", GEMINI_API_KEY);
-    http.setTimeout(30000);
+static const char schemaJson[] =
+    "{\"type\":\"OBJECT\",\"properties\":{"
+    "\"summary\":{\"type\":\"STRING\"},"
+    "\"category\":{\"type\":\"STRING\",\"enum\":[\"delivery\",\"resident_visitor\",\"suspicious\",\"threat\",\"animal\",\"false_alarm\"]},"
+    "\"urgency\":{\"type\":\"STRING\",\"enum\":[\"none\",\"low\",\"medium\",\"high\"]},"
+    "\"people\":{\"type\":\"INTEGER\"},"
+    "\"packages\":{\"type\":\"INTEGER\"},"
+    "\"vehicles\":{\"type\":\"INTEGER\"},"
+    "\"image_quality\":{\"type\":\"STRING\",\"enum\":[\"good\",\"poor\"]},"
+    "\"actions\":{\"type\":\"ARRAY\",\"items\":{\"type\":\"STRING\"}}"
+    "},\"required\":[\"summary\",\"category\",\"urgency\",\"people\",\"packages\",\"vehicles\",\"image_quality\",\"actions\"]}";
 
-    // Advanced security guard system prompt — plain ASCII, single quotes only
-    static const char* systemPrompt =
-        "You are an autonomous AI doorstep security assistant for a home entrance camera. "
-        "Analyze the provided single still frame from the front door camera. "
-        "Provide a factual, objective, and accurate assessment. Never assume intent or invent details not clearly visible. "
-        "Do not use conversational filler (such as 'In this image' or 'We see'); start directly with the subject. "
-        "CATEGORIZATION: "
-        "- delivery: couriers with uniforms, safety vests, scanner devices, packages, mailers, or parcel drop-offs. "
-        "- resident_visitor: people approaching normally, knocking, ringing the bell, or entering/exiting peacefully. "
-        "- suspicious: loitering without knocking/ringing, face deliberately concealed (hood/mask/gaiter), window peering, or hesitant night lingering. "
-        "- threat: forced entry, tampering with door locks/handles, visible weapons or tools, aggressive actions, or package theft in progress. "
-        "- animal: pets (dogs, cats) or wildlife in the field of view. "
-        "- false_alarm: empty doorstep, tree branches swaying in wind, moving shadows, vehicle headlights, glare, or insects/rain on the lens. "
-        "URGENCY: "
-        "- none: false alarms, empty scene, harmless wildlife, or ambient motion. "
-        "- low: routine parcel delivery, resident arrival/departure, or familiar visitor. "
-        "- medium: unfamiliar person loitering, peering in windows, or concealing identity. "
-        "- high: active break-in attempt, lock manipulation, package theft, or immediate hazard. "
-        "SUMMARY: Exactly 1 to 2 clear, concise sentences. "
-        "IMAGE QUALITY: 'poor' if too dark, blurry, or blocked; otherwise 'good'. "
-        "ACTIONS: 1 to 2 imperative suggestions under 8 words each (e.g., 'Retrieve package', 'Verify door lock', 'None required').";
+String callGeminiAPI(camera_fb_t* fb) {
+    if (!fb || !fb->buf || fb->len == 0) return "";
 
-    // responseSchema forces Gemini 3.8 Flash to return strict JSON matching this structure
-    static const char* schema = R"json({
-      "type": "OBJECT",
-      "properties": {
-        "summary":       { "type": "STRING" },
-        "category":      { "type": "STRING", "enum": ["delivery", "resident_visitor", "suspicious", "threat", "animal", "false_alarm"] },
-        "urgency":       { "type": "STRING", "enum": ["none", "low", "medium", "high"] },
-        "people":        { "type": "INTEGER" },
-        "packages":      { "type": "INTEGER" },
-        "vehicles":      { "type": "INTEGER" },
-        "image_quality": { "type": "STRING", "enum": ["good", "poor"] },
-        "actions":       { "type": "ARRAY", "items": { "type": "STRING" } }
-      },
-      "required": ["summary", "category", "urgency", "people", "packages", "vehicles", "image_quality", "actions"]
-    })json";
+    String jsonPre =
+        "{\"system_instruction\":{\"parts\":[{\"text\":\"" + String(systemPrompt) + "\"}]},"
+        "\"contents\":[{\"parts\":["
+        "{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"";
 
-    String body;
-    body.reserve(base64Image.length() + 3500);
+    String jsonPost =
+        "\"}},{\"text\":\"Analyze this frame.\"}]}],\"generationConfig\":{\"temperature\":0.2,\"responseMimeType\":\"application/json\",\"responseSchema\":" + String(schemaJson) + "}}";
 
-    body  = "{\"system_instruction\":{\"parts\":[{\"text\":\"";
-    body += systemPrompt;
-    body += "\"}]},";
-    body += "\"contents\":[{\"parts\":[";
-    body += "{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"";
-    body += base64Image;
-    body += "\"}},";
-    body += "{\"text\":\"Analyze this frame.\"}";
-    body += "]}],";
-    body += "\"generationConfig\":{\"temperature\":0.2,";
-    body += "\"responseMimeType\":\"application/json\",";
-    body += "\"responseSchema\":";
-    body += schema;
-    body += "}}";
+    size_t b64Len = ((fb->len + 2) / 3) * 4;
+    size_t totalBodyLen = jsonPre.length() + b64Len + jsonPost.length();
 
-    Serial.printf("Sending to Gemini (%u bytes)...\n", body.length());
-    int httpCode = http.POST(body);
+    for (int attempt = 0; attempt < NUM_MODELS; attempt++) {
+        const char* modelName = GEMINI_MODELS[currentModelIdx];
+        Serial.printf("[Gemini] Querying %s (payload %u bytes, frame %u bytes)...\n",
+                      modelName, totalBodyLen, fb->len);
 
-    if (httpCode != 200) {
-        Serial.printf("Gemini HTTP error: %d\n", httpCode);
-        Serial.println(http.getString().substring(0, 300));
-        http.end();
+        WiFiClientSecure client;
+        client.setInsecure();
+        client.setTimeout(25);
 
-        // Retry once after 2 seconds if temporary 503 (high demand) or 429 (rate spike)
-        if (httpCode == 503 || httpCode == 429) {
-            Serial.printf("Gemini %d (busy/rate limit) — retrying once in 2s...\n", httpCode);
-            delay(2000);
-            http.begin(client, url);
-            http.addHeader("Content-Type", "application/json");
-            http.addHeader("x-goog-api-key", GEMINI_API_KEY);
-            http.setTimeout(30000);
-            httpCode = http.POST(body);
-            if (httpCode == 200) {
-                String response = http.getString();
-                http.end();
-                Serial.println("Gemini retry responded OK");
-                return response;
-            }
-            Serial.printf("Gemini retry also failed: %d\n", httpCode);
-            http.end();
+        if (!client.connect(GEMINI_HOST, 443)) {
+            Serial.println("[Gemini] TLS connect failed");
+            currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
+            delay(500);
+            continue;
         }
-        return "";
+
+        // Send HTTP request headers
+        client.print("POST /v1beta/models/" + String(modelName) + ":generateContent HTTP/1.1\r\n");
+        client.print("Host: " + String(GEMINI_HOST) + "\r\n");
+        client.print("x-goog-api-key: " + String(GEMINI_API_KEY) + "\r\n");
+        client.print("Content-Type: application/json\r\n");
+        client.print("User-Agent: ESP32-CAM\r\n");
+        client.print("Connection: close\r\n");
+        client.print("Content-Length: " + String(totalBodyLen) + "\r\n\r\n");
+
+        // Send JSON prefix
+        client.print(jsonPre);
+
+        // Stream Base64 image directly in 768-byte chunks (produces 1024 base64 chars)
+        const size_t RAW_CHUNK = 768;
+        uint8_t b64Chunk[1025];
+        size_t offset = 0;
+        while (offset < fb->len) {
+            size_t chunk = (fb->len - offset < RAW_CHUNK) ? (fb->len - offset) : RAW_CHUNK;
+            size_t outLen = 0;
+            mbedtls_base64_encode(b64Chunk, sizeof(b64Chunk), &outLen, fb->buf + offset, chunk);
+            client.write(b64Chunk, outLen);
+            offset += chunk;
+        }
+
+        // Send JSON suffix
+        client.print(jsonPost);
+        client.flush();
+
+        // Read HTTP status line
+        int httpCode = 0;
+        bool isChunked = false;
+        unsigned long t0 = millis();
+        while (client.connected() && (millis() - t0 < 25000)) {
+            String line = client.readStringUntil('\n');
+            if (line.startsWith("HTTP/1.1 ") || line.startsWith("HTTP/1.0 ")) {
+                httpCode = line.substring(9, 12).toInt();
+                break;
+            }
+        }
+
+        if (httpCode != 200) {
+            Serial.printf("[Gemini] %s HTTP error: %d\n", modelName, httpCode);
+            client.stop();
+            if (httpCode == 429 || httpCode == 404 || httpCode == 503) {
+                currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
+                Serial.printf("[Gemini] Cascading to fallback model: %s\n", GEMINI_MODELS[currentModelIdx]);
+                delay(500);
+            } else {
+                break;
+            }
+            continue;
+        }
+
+        // Read remainder of headers and check for Transfer-Encoding
+        while (client.connected() && (millis() - t0 < 25000)) {
+            String line = client.readStringUntil('\n');
+            String lower = line;
+            lower.toLowerCase();
+            if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) {
+                isChunked = true;
+            }
+            if (line == "\r" || line.length() == 0) {
+                break; // End of headers
+            }
+        }
+
+        // Read response body
+        String response = "";
+        if (!isChunked) {
+            while ((client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                while (client.available()) {
+                    response += (char)client.read();
+                }
+                delay(5);
+            }
+        } else {
+            // Read chunked response
+            while ((client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                String lenLine = client.readStringUntil('\n');
+                lenLine.trim();
+                if (lenLine.length() == 0) continue;
+                long chunkSize = strtol(lenLine.c_str(), NULL, 16);
+                if (chunkSize <= 0) break;
+
+                while (chunkSize > 0 && (client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                    if (client.available()) {
+                        response += (char)client.read();
+                        chunkSize--;
+                    } else {
+                        delay(2);
+                    }
+                }
+                client.readStringUntil('\n'); // Consume trailing \r\n
+            }
+        }
+
+        client.stop();
+        Serial.printf("[Gemini] %s responded 200 OK (%u bytes)\n", modelName, response.length());
+        return response;
     }
 
-    String response = http.getString();
-    http.end();
-    Serial.println("Gemini responded OK");
-    return response;
+    return "";
+}
+
+String callGeminiAPI(const String& base64Image) {
+    if (base64Image.isEmpty()) return "";
+
+    String jsonPre =
+        "{\"system_instruction\":{\"parts\":[{\"text\":\"" + String(systemPrompt) + "\"}]},"
+        "\"contents\":[{\"parts\":["
+        "{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"";
+
+    String jsonPost =
+        "\"}},{\"text\":\"Analyze this frame.\"}]}],\"generationConfig\":{\"temperature\":0.2,\"responseMimeType\":\"application/json\",\"responseSchema\":" + String(schemaJson) + "}}";
+
+    size_t totalBodyLen = jsonPre.length() + base64Image.length() + jsonPost.length();
+
+    for (int attempt = 0; attempt < NUM_MODELS; attempt++) {
+        const char* modelName = GEMINI_MODELS[currentModelIdx];
+        WiFiClientSecure client;
+        client.setInsecure();
+        client.setTimeout(25);
+
+        if (!client.connect(GEMINI_HOST, 443)) {
+            currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
+            delay(500);
+            continue;
+        }
+
+        client.print("POST /v1beta/models/" + String(modelName) + ":generateContent HTTP/1.1\r\n");
+        client.print("Host: " + String(GEMINI_HOST) + "\r\n");
+        client.print("x-goog-api-key: " + String(GEMINI_API_KEY) + "\r\n");
+        client.print("Content-Type: application/json\r\n");
+        client.print("User-Agent: ESP32-CAM\r\n");
+        client.print("Connection: close\r\n");
+        client.print("Content-Length: " + String(totalBodyLen) + "\r\n\r\n");
+
+        client.print(jsonPre);
+        client.print(base64Image);
+        client.print(jsonPost);
+        client.flush();
+
+        int httpCode = 0;
+        bool isChunked = false;
+        unsigned long t0 = millis();
+        while (client.connected() && (millis() - t0 < 25000)) {
+            String line = client.readStringUntil('\n');
+            if (line.startsWith("HTTP/1.1 ") || line.startsWith("HTTP/1.0 ")) {
+                httpCode = line.substring(9, 12).toInt();
+                break;
+            }
+        }
+
+        if (httpCode != 200) {
+            client.stop();
+            if (httpCode == 429 || httpCode == 404 || httpCode == 503) {
+                currentModelIdx = (currentModelIdx + 1) % NUM_MODELS;
+                delay(500);
+            } else {
+                break;
+            }
+            continue;
+        }
+
+        while (client.connected() && (millis() - t0 < 25000)) {
+            String line = client.readStringUntil('\n');
+            String lower = line;
+            lower.toLowerCase();
+            if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) isChunked = true;
+            if (line == "\r" || line.length() == 0) break;
+        }
+
+        String response = "";
+        if (!isChunked) {
+            while ((client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                while (client.available()) response += (char)client.read();
+                delay(5);
+            }
+        } else {
+            while ((client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                String lenLine = client.readStringUntil('\n');
+                lenLine.trim();
+                if (lenLine.length() == 0) continue;
+                long chunkSize = strtol(lenLine.c_str(), NULL, 16);
+                if (chunkSize <= 0) break;
+                while (chunkSize > 0 && (client.connected() || client.available()) && (millis() - t0 < 25000)) {
+                    if (client.available()) {
+                        response += (char)client.read();
+                        chunkSize--;
+                    } else delay(2);
+                }
+                client.readStringUntil('\n');
+            }
+        }
+        client.stop();
+        return response;
+    }
+    return "";
 }
 
 GeminiAnalysis parseGeminiResponse(const String& jsonResponse) {

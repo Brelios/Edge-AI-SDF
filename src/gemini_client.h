@@ -17,7 +17,12 @@ struct GeminiAnalysis {
     bool success = false;
 };
 
-// Send Base64 JPEG to Gemini 3.8 Flash Vision API with structured JSON responseSchema
+#include "esp_camera.h"
+
+// Send camera frame directly to Gemini Vision API with streaming Base64 (zero extra heap)
+String callGeminiAPI(camera_fb_t* fb);
+
+// Send Base64 JPEG to Gemini Vision API (legacy overload)
 String callGeminiAPI(const String& base64Image);
 
 // Parse structured JSON response into GeminiAnalysis
