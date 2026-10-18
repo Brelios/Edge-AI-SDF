@@ -49,24 +49,14 @@ void initMotionDetector() {
 }
 
 void resetMotionBaseline() {
-    // Settle 2 frames and re-seed baseline after an alert cycle
-    float sum = 0;
-    int count = 0;
-    for (int i = 0; i < 2; i++) {
-        camera_fb_t* fb = esp_camera_fb_get();
-        if (fb && fb->len > 0) {
-            sum += fb->len;
-            count++;
-            esp_camera_fb_return(fb);
-        }
-        delay(50);
-    }
-    if (count > 0) {
-        baselineLen = sum / count;
-        prevFrameLen = (size_t)baselineLen;
-        staticDriftCount = 0;
-        Serial.printf("[Motion] Baseline re-seeded post-alert: %.0f bytes\n", baselineLen);
-    }
+    // Non-blocking baseline reset:
+    // Invalidate baseline so the very next regular surveillance frame in loop()
+    // seeds it cleanly without blocking the CPU or introducing 500ms delay.
+    baselineReady = false;
+    baselineLen = 0;
+    prevFrameLen = 0;
+    staticDriftCount = 0;
+    Serial.println("[Motion] Baseline cleared post-alert — next frame re-seeds immediately.");
 }
 
 void adaptMotionBaseline(size_t curLen) {

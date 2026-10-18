@@ -27,7 +27,7 @@
 #define MOTION_SENSITIVITY         0.07f
 
 // Minimum milliseconds between successive Gemini/Telegram alerts.
-#define MOTION_COOLDOWN_MS         12000              // 12 seconds between alert cycles
+#define MOTION_COOLDOWN_MS         4000               // 4 seconds between alert cycles (snappy response, prevents duplicate bursts)
 
 // Milliseconds between surveillance frames (200ms = 5 checks per second for fast reaction)
 #define MOTION_POLL_INTERVAL_MS    200

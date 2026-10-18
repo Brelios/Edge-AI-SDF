@@ -62,6 +62,9 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
         Serial.printf("[Alert] Suppressed — Gemini classified as false_alarm (AI: %ums).\n",
                       g_metrics.lastAiLatencyMs);
         esp_camera_fb_return(fb);
+        lastAlertMs = millis();
+        lastTelegramMs = millis();
+        resetMotionBaseline();
         return;
     }
 
@@ -72,6 +75,7 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     esp_camera_fb_return(fb);
 
     lastAlertMs = millis();
+    lastTelegramMs = millis(); // Defer Telegram polling so camera surveillance resumes with zero blind spot!
     Serial.printf("[Alert] Dispatch complete! [Timing Breakdown] AI: %ums | Upload: %ums | Total: %ums\n",
                   g_metrics.lastAiLatencyMs, g_metrics.lastUploadLatencyMs,
                   g_metrics.lastAiLatencyMs + g_metrics.lastUploadLatencyMs);
