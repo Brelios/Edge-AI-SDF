@@ -289,19 +289,22 @@ You can fine-tune operating parameters at the top of [src/main.cpp](src/main.cpp
 
 ```text
 Edge-AI-SDF/
-├── Building/
-│   ├── BUILD_PLAN.md               # Detailed engineering and deployment build plan
-│   └── ESP32-CAM_Programming_...   # Guide for using NodeMCU / DevKit programmers
 ├── docs/
-│   └── COMPONENTS.md               # Hardware specifications and component pinouts
+│   ├── BUILD_PLAN.md               # Detailed engineering and deployment build plan
+│   ├── COMPONENTS.md               # Hardware specifications and component pinouts
+│   └── ESP32-CAM_Programming_...   # Guide for using NodeMCU / DevKit programmers
 ├── include/
-│   ├── README                      # Include directory guidelines
 │   ├── secrets_example.h           # Template credentials file (safe to commit)
 │   └── secrets.h                   # Active credentials file (git-ignored)
 ├── src/
+│   ├── config.h                    # System settings, intervals, and endpoints
+│   ├── camera_driver.h / .cpp      # OV2640 driver, DSP tuning & Base64 encoder
+│   ├── gemini_client.h / .cpp      # Gemini 3.8 Flash Vision API client & parser
+│   ├── telegram_client.h / .cpp    # Telegram Bot photo & message dispatcher
+│   ├── power_manager.h / .cpp      # PIR interrupt, debouncing & Light/Deep sleep
 │   ├── board_config.h              # Board selection header
-│   ├── camera_pins.h               # Pin definitions for AI-Thinker and camera models
-│   └── main.cpp                    # Primary Edge AI firmware
+│   ├── camera_pins.h               # Pin definitions for AI-Thinker ESP32-CAM
+│   └── main.cpp                    # High-level orchestrator (~140 lines)
 ├── platformio.ini                  # PlatformIO environment, build flags, and dependencies
 ├── .gitignore                      # Git exclusion rules (protects secrets.h and binaries)
 └── Readme.md                       # Project documentation

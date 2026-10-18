@@ -18,6 +18,7 @@ secrets.h
 *.bin
 *.elf
 *.hex
+compile_commands.json
 
 # =============================================================================
 # VS Code & IDEs
