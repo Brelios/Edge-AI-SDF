@@ -19,3 +19,7 @@ String encodeFBtoBase64(camera_fb_t* fb);
 // Capture a JPEG frame, Base64 encode it in PSRAM/DRAM, and pass back the camera_fb_t pointer
 // Used only for Gemini API calls which require base64 input.
 String captureAndEncodeJPEG(camera_fb_t** fb_out);
+
+// Flash LED control functions
+void initFlash();
+void triggerFlash(uint16_t durationMs = 120);

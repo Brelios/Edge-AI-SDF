@@ -1,12 +1,30 @@
 #include "camera_driver.h"
 #include "board_config.h"
+#include "config.h"
 #include "mbedtls/base64.h"
+
+void initFlash() {
+    #if defined(FLASH_LED_PIN)
+    pinMode(FLASH_LED_PIN, OUTPUT);
+    digitalWrite(FLASH_LED_PIN, LOW); // Start with flash OFF
+    #endif
+}
+
+void triggerFlash(uint16_t durationMs) {
+    #if defined(FLASH_LED_PIN)
+    digitalWrite(FLASH_LED_PIN, HIGH);
+    delay(durationMs);
+    digitalWrite(FLASH_LED_PIN, LOW);
+    #endif
+}
 
 framesize_t getTargetFrameSize() {
     return psramFound() ? FRAMESIZE_HD : FRAMESIZE_VGA;
 }
 
 bool initCamera() {
+    initFlash();
+
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer   = LEDC_TIMER_0;
@@ -38,14 +56,14 @@ bool initCamera() {
         config.xclk_freq_hz = 20000000;
         config.jpeg_buffer_size = 0;
     } else {
-        Serial.println("[Camera] No PSRAM — using DRAM with 10MHz clock, VGA (640x480), and 48KB buffer");
+        Serial.println("[Camera] No PSRAM — using DRAM with 10MHz clock, VGA (640x480), and 56KB buffer");
         config.frame_size   = FRAMESIZE_VGA;       // 640x480 gives 4x pixel clarity in DRAM
-        config.jpeg_quality = 14;                  // Quality 14 gives clean sharp image (~18-24KB)
+        config.jpeg_quality = 18;                  // Quality 18 gives crisp image at ~20-25KB, preventing FB-OVF
         config.fb_count     = 1;                   // Single buffer saves precious DRAM
         config.fb_location  = CAMERA_FB_IN_DRAM;
         config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
         config.xclk_freq_hz = 10000000;             // 10 MHz prevents bus overrun
-        config.jpeg_buffer_size = 49152;           // 48 KB buffer (fits VGA frames reliably)
+        config.jpeg_buffer_size = 57344;           // 56 KB buffer (guarantees zero FB-OVF)
     }
 
     esp_err_t err = ESP_FAIL;
@@ -104,18 +122,31 @@ camera_fb_t* captureJPEG() {
         s->set_pixformat(s, PIXFORMAT_JPEG);
     }
 
-    // Flush stale frame to ensure fresh capture
+#if defined(ENABLE_FLASH_ON_CAPTURE) && ENABLE_FLASH_ON_CAPTURE
+    // Flash ON: Illuminate scene
+    digitalWrite(FLASH_LED_PIN, HIGH);
+    // Allow sensor AEC to adapt to flash light
+    delay(FLASH_DURATION_MS);
+#endif
+
+    // Flush stale pre-flash frame to ensure fresh capture
     camera_fb_t* flush = esp_camera_fb_get();
     if (flush) esp_camera_fb_return(flush);
 
-    // Capture fresh frame
+    // Capture fresh frame with flash illumination
     camera_fb_t* fb = esp_camera_fb_get();
+
+#if defined(ENABLE_FLASH_ON_CAPTURE) && ENABLE_FLASH_ON_CAPTURE
+    // Flash OFF
+    digitalWrite(FLASH_LED_PIN, LOW);
+#endif
+
     if (!fb) {
         Serial.println("[captureJPEG] Capture returned null");
         return nullptr;
     }
 
-    Serial.printf("[captureJPEG] Frame: %u bytes (%dx%d)\n", fb->len, fb->width, fb->height);
+    Serial.printf("[captureJPEG] Frame: %u bytes (%dx%d) [FLASH ACTIVE]\n", fb->len, fb->width, fb->height);
     return fb;
 }
 

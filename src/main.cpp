@@ -34,7 +34,18 @@ static void dispatchAlert(camera_fb_t* fb, const char* trigger) {
     if (!fb || fb->len == 0) return;
 
     Serial.printf("\n>>> [ALERT] Triggered by: %s <<<\n", trigger);
-    Serial.printf("    Trigger frame: %u bytes (%dx%d)  Free heap: %u bytes\n",
+
+#if defined(ENABLE_FLASH_ON_CAPTURE) && ENABLE_FLASH_ON_CAPTURE
+    // Flash capture: Illuminate the subject who triggered motion!
+    esp_camera_fb_return(fb);  // release pre-flash motion detection frame
+    fb = captureJPEG();        // capture crisp, brightly illuminated flash photo
+    if (!fb || fb->len == 0) {
+        Serial.println("[Alert] Flash capture returned null");
+        return;
+    }
+#endif
+
+    Serial.printf("    Alert frame: %u bytes (%dx%d)  Free heap: %u bytes\n",
                   fb->len, fb->width, fb->height, ESP.getFreeHeap());
 
     // Call Gemini Vision API directly streaming the frame (zero heap Base64 allocation)

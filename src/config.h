@@ -37,6 +37,13 @@
 #define SUPPRESS_FALSE_ALARMS      true
 
 // ---------------------------------------------------------------------------
+// Flash LED Configuration
+// ---------------------------------------------------------------------------
+#define FLASH_LED_PIN              4                   // Onboard high-power white flash LED (GPIO 4)
+#define ENABLE_FLASH_ON_CAPTURE    true                // Always flash when clicking a picture (/snap & motion)
+#define FLASH_DURATION_MS          120                 // Duration flash remains active to expose frame (ms)
+
+// ---------------------------------------------------------------------------
 // Telegram Remote Command Polling
 // ---------------------------------------------------------------------------
 // Check Telegram for incoming commands (/snap, /status, etc.) every 3.5s
