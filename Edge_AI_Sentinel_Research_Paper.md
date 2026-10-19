@@ -1,7 +1,7 @@
 # Edge-Assisted AI Door Sentinel: Iterative Design of a Real-Time Doorstep Surveillance System on DRAM-Constrained IoT Hardware Using Optical Motion Detection and Cloud Multimodal Vision
 
 **Atharv Thakare, Ayush Gandhi**  
-*Department of Computer Science & Engineering*  
+*Department of  Electronics & Computer Science Engineering*  
 Contact: `atharv1792006@gmail.com` | Project Repository: [github.com/Brelios/Edge-AI-SDF](https://github.com/Brelios/Edge-AI-SDF)
 
 ---
